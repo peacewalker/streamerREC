@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -19,7 +20,9 @@ PI_MODE = os.environ.get("STREAMREC_PI_MODE", "0") == "1"
 
 app = FastAPI(title="StreamRec API")
 
-RECORDINGS_DIR = Path("/recordings")
+
+# Use a relative 'recordings' directory for cross-platform compatibility
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
 RECORDINGS_DIR.mkdir(exist_ok=True)
 STATE_FILE = RECORDINGS_DIR / "state.json"
 
@@ -276,12 +279,22 @@ async def run_recording(rec_id: str):
     rec["log"] = []
     size_task = None
 
+
+    import sys
+    # On Unix, use preexec_fn=os.setsid; on Windows, use creationflags
+    creationflags = 0
+    preexec_fn = None
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
+    else:
+        preexec_fn = os.setsid
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            preexec_fn=os.setsid,
+            preexec_fn=preexec_fn,
+            creationflags=creationflags
         )
         rec["pid"] = proc.pid
 
@@ -573,8 +586,14 @@ async def stop_channel(ch_id: str):
     rec = recordings[rec_id]
     rec["stopping"] = True
     if pid := rec.get("pid"):
+        import sys
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            if sys.platform == "win32":
+                # On Windows, send CTRL_BREAK_EVENT to the process group
+                import signal as _signal
+                os.kill(pid, _signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -594,8 +613,13 @@ async def kill_channel(ch_id: str):
     rec = recordings[rec_id]
     rec["stopping"] = True
     if pid := rec.get("pid"):
+        import sys
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            if sys.platform == "win32":
+                import signal as _signal
+                os.kill(pid, _signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -634,9 +658,14 @@ async def delete_channel(ch_id: str):
     if rec_id and rec_id in recordings:
         rec = recordings[rec_id]
         rec["stopping"] = True
+        import sys
         if pid := rec.get("pid"):
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                if sys.platform == "win32":
+                    import signal as _signal
+                    os.kill(pid, _signal.CTRL_BREAK_EVENT)
+                else:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
                 try:
                     os.kill(pid, signal.SIGTERM)
@@ -872,4 +901,11 @@ async def import_config(req: ImportRequest):
     return {"ok": True, "imported_channels": imported}
 
 
-app.mount("/", StaticFiles(directory="/app", html=True), name="static")
+# Serve static files from the local directory (cross-platform)
+app_dir = Path(__file__).parent
+static_dir = app_dir
+if (app_dir / "index.html").exists():
+    static_dir = app_dir
+elif (app_dir / "app").exists():
+    static_dir = app_dir / "app"
+app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
