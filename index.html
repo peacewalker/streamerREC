@@ -612,6 +612,19 @@ html.light .plat-tiktok { background: #333; }
     </div>
     <div class="settings-body">
       <div class="settings-section">
+        <div class="settings-section-title">🥔 Performance</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Potato / Pi mode</div>
+              <div class="settings-desc">Reduces CPU, RAM, and I/O usage for Raspberry Pi and low-power PCs — fewer threads, slower polling, smaller buffers</div>
+            </div>
+            <button class="sm-toggle off" id="s-pi-mode" onclick="toggleSetting(this)"></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">Monitoring</div>
         <div class="settings-card">
           <div class="settings-row">
@@ -1006,7 +1019,7 @@ html.light .plat-tiktok { background: #333; }
   <button class="preview-close" onclick="closePreview()">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
   </button>
-  <video class="preview-video" id="previewVideo" controls preload="auto"></video>
+  <video class="preview-video" id="previewVideo" controls preload="metadata"></video>
   <div class="preview-title" id="previewTitle"></div>
 </div>
 
@@ -1317,8 +1330,8 @@ async function refreshLog() {
 
 // ── Debounce helper ───────────────────────────────────────────────────────────
 function debounce(fn, ms) {
-  let t;
-  return function(...args) { const self = this; clearTimeout(t); t = setTimeout(() => fn.apply(self, args), ms); };
+  let timeoutId;
+  return function(...args) { const context = this; clearTimeout(timeoutId); timeoutId = setTimeout(() => fn.apply(context, args), ms); };
 }
 
 // ── Render ─────────────────────────────────────────────────────────────────────
@@ -1551,6 +1564,7 @@ async function loadSettings() {
     const res = await fetch(`${API}/api/settings`);
     const s = await res.json();
     globalSettings = s;
+    setToggle('s-pi-mode',          !!s.pi_mode);
     document.getElementById('s-interval').value   = s.monitor_interval ?? 60;
     document.getElementById('s-quality').value    = s.default_quality  ?? 'best';
     document.getElementById('s-format').value     = s.default_format   ?? 'mp4';
@@ -1570,6 +1584,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const body = {
+    pi_mode:          !document.getElementById('s-pi-mode').classList.contains('off'),
     monitor_interval: parseInt(document.getElementById('s-interval').value) || 60,
     default_quality:  document.getElementById('s-quality').value,
     default_format:   document.getElementById('s-format').value,
@@ -1972,13 +1987,13 @@ async function deleteCookieFile(filename) {
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
-let _pollInterval = 5000;  // default; adjusted after version fetch
+let pollInterval = 5000;  // default; adjusted after version fetch
 
 async function initPolling() {
   try {
     const res = await fetch(`${API}/api/version`);
     const data = await res.json();
-    if (data.poll_interval) _pollInterval = data.poll_interval * 1000;
+    if (data.poll_interval) pollInterval = data.poll_interval * 1000;
   } catch {}
 }
 
@@ -1989,7 +2004,7 @@ initPolling();
 setInterval(() => {
   fetchChannels();
   if (activeLogChId) refreshLog();
-}, _pollInterval);
+}, pollInterval);
 
 // Tick recording durations every second without a full fetch
 setInterval(() => {

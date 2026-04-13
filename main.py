@@ -74,12 +74,37 @@ recordings: dict[str, dict] = {}
 _disk_cache:    dict  = {}
 _disk_cache_ts: float = 0
 
-# ── Tuning knobs (Pi vs. normal) ─────────────────────────────────────────────
-_SIZE_POLL_INTERVAL   = 8  if PI_MODE else 3     # seconds between file-size polls
-_LOG_BUFFER_MAX       = 60 if PI_MODE else 100   # max log lines before trim
-_LOG_BUFFER_TRIM      = 30 if PI_MODE else 50    # lines kept after trim
-_FRONTEND_POLL_HINT   = 10 if PI_MODE else 5     # suggested poll interval for UI
-_DISK_CACHE_TTL       = 60 if PI_MODE else 30    # disk usage cache lifetime (seconds)
+# ── Tuning helpers (Pi vs. normal) ───────────────────────────────────────────
+# These read from `settings["pi_mode"]` at call time so the toggle takes
+# effect immediately without a restart.
+
+def _is_pi() -> bool:
+    """True when Potato / Pi mode is active (env var OR settings toggle)."""
+    return settings.get("pi_mode", PI_MODE)
+
+def get_size_poll_interval() -> int:
+    return 8 if _is_pi() else 3
+
+def get_log_limits() -> tuple[int, int]:
+    """Return (max_lines, trim_to) for the recording log buffer."""
+    return (60, 30) if _is_pi() else (100, 50)
+
+def get_frontend_poll_hint() -> int:
+    return 10 if _is_pi() else 5
+
+def get_disk_cache_ttl() -> int:
+    return 60 if _is_pi() else 30
+
+def get_ffmpeg_threads() -> str:
+    return "1" if _is_pi() else "2"
+
+# Streaming / preview constants — large chunks reduce HTTP round-trips and
+# I/O syscalls, critical on Raspberry Pi / slow SD cards.
+PREVIEW_RANGE_CHUNK  = 10 * 1024 * 1024   # 10 MB per HTTP range response
+PREVIEW_READ_CHUNK   = 512 * 1024         # 512 KB per file read()
+
+# Remux timeout — 5 min to handle large files on slow Pi SD cards
+REMUX_TIMEOUT        = 300
 
 # ── Debounced state persistence ──────────────────────────────────────────────
 _save_state_pending = False
@@ -94,13 +119,17 @@ def _schedule_save_state():
     _save_state_task = asyncio.get_running_loop().create_task(_debounced_save())
 
 async def _debounced_save():
+    """Wait for writes to settle, then flush once."""
     global _save_state_pending
-    while _save_state_pending:
+    while True:
         _save_state_pending = False
-        await asyncio.sleep(2)  # wait 2s for more writes to coalesce
+        await asyncio.sleep(2)  # coalesce window
+        if not _save_state_pending:
+            break                # no new writes arrived — safe to flush
     _save_state_sync()
 
 settings: dict = {
+    "pi_mode":          PI_MODE,
     "monitor_interval": 120 if PI_MODE else 60,
     "default_quality":  "best",
     "default_format":   "mp4",
@@ -511,7 +540,7 @@ async def run_recording(rec_id: str):
         cmd += ["--live-from-start", "--hls-use-mpegts"]
 
     # Limit ffmpeg thread count — critical for Pi / low-power CPUs
-    ffmpeg_threads = "1" if PI_MODE else "2"
+    ffmpeg_threads = get_ffmpeg_threads()
     cmd += [
         "--retries", "infinite", "--fragment-retries", "infinite",
         "--retry-sleep", "5", "--socket-timeout", "30",
@@ -524,7 +553,7 @@ async def run_recording(rec_id: str):
         "--progress", "--print", "after_move:filepath",
     ]
     # On Pi / low-memory systems, cap the download buffer to reduce RAM usage
-    if PI_MODE:
+    if _is_pi():
         cmd += ["--buffer-size", "32K"]
     # Chaturbate (and similar HLS cam sites) have audio segments that start
     # exactly 1 second ahead of video — delay audio by 1s to compensate.
@@ -581,7 +610,7 @@ async def run_recording(rec_id: str):
             last_bytes = 0
             last_time = time.time()
             while True:
-                await asyncio.sleep(_SIZE_POLL_INTERVAL)
+                await asyncio.sleep(get_size_poll_interval())
                 for f in rec_dir.glob(f"{stem}.*"):
                     try:
                         sz = f.stat().st_size
@@ -614,8 +643,9 @@ async def run_recording(rec_id: str):
                 if not line:
                     continue
                 rec["log"].append(line)
-                if len(rec["log"]) > _LOG_BUFFER_MAX:
-                    rec["log"] = rec["log"][-_LOG_BUFFER_TRIM:]
+                log_max, log_trim = get_log_limits()
+                if len(rec["log"]) > log_max:
+                    rec["log"] = rec["log"][-log_trim:]
                 # ffmpeg progress line (HLS via ffmpeg downloader):
                 # "frame= 49 fps=0.0 size=  256KiB time=00:00:01 bitrate=1279.8kbits/s speed= 3.2x"
                 if "frame=" in line and "bitrate=" in line:
@@ -702,7 +732,7 @@ async def run_recording(rec_id: str):
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                await asyncio.wait_for(fix_proc.wait(), timeout=300)
+                await asyncio.wait_for(fix_proc.wait(), timeout=REMUX_TIMEOUT)
                 if fix_proc.returncode == 0 and Path(fixed_path).exists():
                     Path(fp).unlink(missing_ok=True)
                     Path(fixed_path).rename(fp)
@@ -842,6 +872,7 @@ class UpdateChannelRequest(BaseModel):
     extra_args:       Optional[str]  = None
 
 class UpdateSettingsRequest(BaseModel):
+    pi_mode:          Optional[bool] = None
     monitor_interval: Optional[int]  = None
     default_quality:  Optional[str]  = None
     default_format:   Optional[str]  = None
@@ -1135,15 +1166,10 @@ async def preview_recording(rec_id: str, request: Request):
         "video/mp2t"
     )
 
-    # Larger range responses (10 MB) and read chunks (512 KB) reduce HTTP
-    # round-trips and I/O syscalls — critical on Raspberry Pi / slow SD cards.
-    range_chunk  = 10 * 1024 * 1024   # 10 MB per range response
-    read_chunk   = 512 * 1024         # 512 KB per read()
-
     range_header = request.headers.get("range")
     if range_header:
         start = int(range_header.replace("bytes=", "").split("-")[0])
-        end   = min(start + range_chunk, file_size - 1)
+        end   = min(start + PREVIEW_RANGE_CHUNK, file_size - 1)
         length = end - start + 1
 
         def iterfile():
@@ -1151,7 +1177,7 @@ async def preview_recording(rec_id: str, request: Request):
                 f.seek(start)
                 remaining = length
                 while remaining > 0:
-                    chunk = f.read(min(read_chunk, remaining))
+                    chunk = f.read(min(PREVIEW_READ_CHUNK, remaining))
                     if not chunk:
                         break
                     remaining -= len(chunk)
@@ -1270,8 +1296,8 @@ async def health():
 async def version():
     return {
         "version": VERSION,
-        "pi_mode": PI_MODE,
-        "poll_interval": _FRONTEND_POLL_HINT,
+        "pi_mode": _is_pi(),
+        "poll_interval": get_frontend_poll_hint(),
     }
 
 
@@ -1279,7 +1305,7 @@ async def version():
 async def disk_usage():
     global _disk_cache, _disk_cache_ts
     now = time.time()
-    if _disk_cache and now - _disk_cache_ts < _DISK_CACHE_TTL:
+    if _disk_cache and now - _disk_cache_ts < get_disk_cache_ttl():
         return _disk_cache
     try:
         usage     = shutil.disk_usage(str(RECORDINGS_DIR))
