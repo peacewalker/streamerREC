@@ -235,7 +235,6 @@ def detect_platform(url: str) -> str:
 def _username_from_url(url: str) -> str:
     """Best-effort username extraction directly from the URL path."""
     try:
-        from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         # Take first non-empty path segment
         part = path.split("/")[0] if path else ""
