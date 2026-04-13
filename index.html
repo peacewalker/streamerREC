@@ -114,7 +114,9 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 .ch-card {
   background: var(--s1); border: 1px solid var(--border); border-radius: 12px;
   overflow: hidden; transition: border-color 0.15s; cursor: default;
-  contain: layout style;
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 340px;
 }
 .ch-card:hover { border-color: var(--border2); }
 .ch-card.is-live { border-color: rgba(239,68,68,0.35); }
@@ -578,7 +580,7 @@ html.light .plat-tiktok { background: #333; }
       <div class="topbar-right">
         <div class="search-wrap">
           <span class="search-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-          <input class="search-input" id="searchInput" placeholder="Search channels…" oninput="filterCards()">
+          <input class="search-input" id="searchInput" placeholder="Search channels…" oninput="debouncedFilterCards()">
         </div>
         <button class="add-btn" onclick="openAddModal()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -609,6 +611,19 @@ html.light .plat-tiktok { background: #333; }
       <span class="topbar-title">Settings</span>
     </div>
     <div class="settings-body">
+      <div class="settings-section">
+        <div class="settings-section-title">🥔 Performance</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Potato / Pi mode</div>
+              <div class="settings-desc">Reduces CPU, RAM, and I/O usage for Raspberry Pi and low-power PCs — fewer threads, slower polling, smaller buffers</div>
+            </div>
+            <button class="sm-toggle off" id="s-pi-mode" onclick="toggleSetting(this)"></button>
+          </div>
+        </div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Monitoring</div>
         <div class="settings-card">
@@ -817,7 +832,7 @@ html.light .plat-tiktok { background: #333; }
       <div class="topbar-right">
         <div class="search-wrap">
           <span class="search-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-          <input class="search-input" id="platSearchInput" placeholder="Search platforms…" oninput="filterPlatforms()">
+          <input class="search-input" id="platSearchInput" placeholder="Search platforms…" oninput="debouncedFilterPlatforms()">
         </div>
       </div>
     </div>
@@ -1004,7 +1019,7 @@ html.light .plat-tiktok { background: #333; }
   <button class="preview-close" onclick="closePreview()">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
   </button>
-  <video class="preview-video" id="previewVideo" controls></video>
+  <video class="preview-video" id="previewVideo" controls preload="metadata"></video>
   <div class="preview-title" id="previewTitle"></div>
 </div>
 
@@ -1313,6 +1328,12 @@ async function refreshLog() {
   } catch {}
 }
 
+// ── Debounce helper ───────────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let timeoutId;
+  return function(...args) { const context = this; clearTimeout(timeoutId); timeoutId = setTimeout(() => fn.apply(context, args), ms); };
+}
+
 // ── Render ─────────────────────────────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -1524,6 +1545,7 @@ function filterCards() {
     card.style.display = match ? '' : 'none';
   });
 }
+const debouncedFilterCards = debounce(filterCards, 150);
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 async function fetchChannels() {
@@ -1542,6 +1564,7 @@ async function loadSettings() {
     const res = await fetch(`${API}/api/settings`);
     const s = await res.json();
     globalSettings = s;
+    setToggle('s-pi-mode',          !!s.pi_mode);
     document.getElementById('s-interval').value   = s.monitor_interval ?? 60;
     document.getElementById('s-quality').value    = s.default_quality  ?? 'best';
     document.getElementById('s-format').value     = s.default_format   ?? 'mp4';
@@ -1561,6 +1584,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const body = {
+    pi_mode:          !document.getElementById('s-pi-mode').classList.contains('off'),
     monitor_interval: parseInt(document.getElementById('s-interval').value) || 60,
     default_quality:  document.getElementById('s-quality').value,
     default_format:   document.getElementById('s-format').value,
@@ -1579,6 +1603,8 @@ async function saveSettings() {
       method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
     });
     toast('Settings saved');
+    // Re-fetch poll interval in case Pi mode was toggled
+    initPolling();
   } catch(e) { toast('Error: ' + e.message, true); }
 }
 
@@ -1880,6 +1906,7 @@ function filterPlatforms() {
     card.style.display = match ? '' : 'none';
   });
 }
+const debouncedFilterPlatforms = debounce(filterPlatforms, 150);
 
 // ── Cookies management ────────────────────────────────────────────────────────
 async function populateCookiesSelects() {
@@ -1962,12 +1989,29 @@ async function deleteCookieFile(filename) {
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
+let pollInterval = 5000;  // default; adjusted after version fetch
+let pollTimer = null;
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    fetchChannels();
+    if (activeLogChId) refreshLog();
+  }, pollInterval);
+}
+
+async function initPolling() {
+  try {
+    const res = await fetch(`${API}/api/version`);
+    const data = await res.json();
+    if (data.poll_interval) pollInterval = data.poll_interval * 1000;
+  } catch {}
+  startPolling();
+}
+
 fetchChannels();
 loadSettings();
-setInterval(() => {
-  fetchChannels();
-  if (activeLogChId) refreshLog();
-}, 5000);
+initPolling();
 
 // Tick recording durations every second without a full fetch
 setInterval(() => {
