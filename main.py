@@ -743,8 +743,8 @@ async def monitor_loop():
     while True:
         interval = settings.get("monitor_interval", 60)
         await asyncio.sleep(interval)
-        monitored = [c for c in channels.values() if c.get("monitoring", True)]
-        logger.debug("Monitor tick — checking %d channels", len(monitored))
+        monitored_count = sum(1 for c in channels.values() if c.get("monitoring", True))
+        logger.debug("Monitor tick — checking %d channels", monitored_count)
         for ch_id, ch in list(channels.items()):
             if not ch.get("monitoring", True):
                 continue
