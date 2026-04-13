@@ -489,6 +489,40 @@ html.light .plat-tiktok { background: #333; }
 .plat-kick      { background: #53fc18; color: #000 !important; }
 .plat-bilibili  { background: #00a1d6; }
 .plat-default   { background: var(--s3); }
+
+/* ── Platforms page ── */
+.platforms-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px;
+}
+.plat-card {
+  background: var(--s1); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px; display: flex; align-items: center; gap: 14px;
+  transition: border-color 0.15s;
+}
+.plat-card:hover { border-color: var(--border2); }
+.plat-icon {
+  width: 42px; height: 42px; border-radius: 11px; display: flex; align-items: center;
+  justify-content: center; font-size: 18px; font-weight: 700; flex-shrink: 0; color: #fff;
+}
+.plat-info { min-width: 0; flex: 1; }
+.plat-name { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.plat-domain { font-size: 10px; color: var(--sub); font-family: var(--mono); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plat-notes { font-size: 10px; color: var(--muted); line-height: 1.4; }
+
+/* ── Cookies/Credentials section ── */
+.cookie-file-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: var(--s1); border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 6px;
+}
+.cookie-file-name { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.cookie-file-size { font-size: 11px; color: var(--muted); margin-left: 8px; }
+
+/* ── Proxy indicator on card ── */
+.proxy-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; color: var(--purple); font-family: var(--mono);
+}
 </style>
 </head>
 <body>
@@ -507,6 +541,12 @@ html.light .plat-tiktok { background: #333; }
       <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
     </svg>
     <span class="nav-badge" id="live-badge" style="display:none"></span>
+  </button>
+  <button class="nav-btn" id="nav-platforms" onclick="navigate('platforms')" title="Platforms">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+    </svg>
   </button>
   <div class="sidebar-spacer"></div>
   <button class="nav-btn" id="nav-recordings" onclick="navigate('recordings')" title="Recordings">
@@ -674,6 +714,55 @@ html.light .plat-tiktok { background: #333; }
       </div>
 
       <div class="settings-section">
+        <div class="settings-section-title">Network &amp; Proxy</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Global proxy</div>
+              <div class="settings-desc">Used for all recordings unless overridden per-channel</div>
+            </div>
+            <input class="settings-input" type="text" id="s-proxy" placeholder="http://host:port" style="width:180px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Global extra yt-dlp args</div>
+              <div class="settings-desc">Applied to all recordings (per-channel overrides)</div>
+            </div>
+            <input class="settings-input" type="text" id="s-extra-args" placeholder="--no-playlist" style="width:180px;text-align:left">
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Cookies &amp; Authentication</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-info">
+              <div class="settings-label">Global cookies file</div>
+              <div class="settings-desc">Netscape cookies.txt — used unless a channel has its own</div>
+            </div>
+            <select class="settings-select" id="s-cookies-file">
+              <option value="">None</option>
+            </select>
+          </div>
+          <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:10px">
+            <div class="settings-info">
+              <div class="settings-label">Upload cookies file</div>
+              <div class="settings-desc">Export from browser using "Get cookies.txt LOCALLY" extension</div>
+            </div>
+            <div style="display:flex;gap:8px;width:100%;align-items:center">
+              <label class="btn-cancel" style="height:30px;font-size:12px;display:flex;align-items:center;cursor:pointer;white-space:nowrap">
+                Choose file
+                <input type="file" accept=".txt,.json" style="display:none" onchange="uploadCookies(this)">
+              </label>
+              <span id="cookiesUploadStatus" style="font-size:11px;color:var(--sub)"></span>
+            </div>
+            <div id="cookiesList" style="width:100%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">Import / Export</div>
         <div class="settings-card">
           <div class="settings-row">
@@ -717,6 +806,23 @@ html.light .plat-tiktok { background: #333; }
     </div>
     <div class="grid-area">
       <div id="recList" class="rec-list"></div>
+    </div>
+  </div>
+
+  <!-- Platforms page -->
+  <div class="page" id="page-platforms">
+    <div class="topbar">
+      <span class="topbar-title">Platforms</span>
+      <span class="topbar-sub" id="platform-count"></span>
+      <div class="topbar-right">
+        <div class="search-wrap">
+          <span class="search-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+          <input class="search-input" id="platSearchInput" placeholder="Search platforms…" oninput="filterPlatforms()">
+        </div>
+      </div>
+    </div>
+    <div class="grid-area">
+      <div class="platforms-grid" id="platformsGrid"></div>
     </div>
   </div>
 
@@ -764,16 +870,37 @@ html.light .plat-tiktok { background: #333; }
       <button class="sm-toggle off" id="addRecordNow" onclick="toggleSetting(this)"></button>
     </div>
     <div class="toggle-row">
-      <div class="toggle-info"><div class="toggle-title">Record from beginning</div><div class="toggle-desc">Capture the entire stream from its start instead of only from the current moment</div></div>
-      <button class="sm-toggle" id="addRecordFromStart" onclick="toggleSetting(this)"></button>
-    </div>
-    <div class="toggle-row">
       <div class="toggle-info"><div class="toggle-title">Auto-convert to MP4</div><div class="toggle-desc">Override global setting for this channel</div></div>
       <button class="sm-toggle off" id="addAutoConvert" onclick="toggleSetting(this)"></button>
     </div>
     <div class="toggle-row" style="border-bottom:none">
       <div class="toggle-info"><div class="toggle-title">Delete original</div><div class="toggle-desc">Remove source after MP4 conversion</div></div>
       <button class="sm-toggle off" id="addDeleteOrig" onclick="toggleSetting(this)"></button>
+    </div>
+    <div class="modal-section">Authentication &amp; Network</div>
+    <div class="field">
+      <div class="field-lbl">Proxy URL</div>
+      <input class="field-input" id="addProxy" type="text" placeholder="http://user:pass@host:port or socks5://…">
+    </div>
+    <div class="field">
+      <div class="field-lbl">Cookies file</div>
+      <select class="field-input" id="addCookiesFile">
+        <option value="">None (global default)</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <div class="field-lbl">Username</div>
+        <input class="field-input" id="addChUsername" type="text" placeholder="For age-restricted sites">
+      </div>
+      <div class="field">
+        <div class="field-lbl">Password</div>
+        <input class="field-input" id="addChPassword" type="password" placeholder="Site password">
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-lbl">Extra yt-dlp args</div>
+      <input class="field-input" id="addExtraArgs" type="text" placeholder="e.g. --no-playlist --sub-langs en">
     </div>
     <div class="modal-actions">
       <button class="btn-cancel" onclick="closeAddModal()">Cancel</button>
@@ -824,13 +951,35 @@ html.light .plat-tiktok { background: #333; }
       <div class="toggle-info"><div class="toggle-title">Auto-convert to MP4</div><div class="toggle-desc">Re-mux this channel's recordings to MP4 (stream copy)</div></div>
       <button class="sm-toggle off" id="chAutoConvert" onclick="toggleSetting(this)"></button>
     </div>
-    <div class="toggle-row">
-      <div class="toggle-info"><div class="toggle-title">Record from beginning</div><div class="toggle-desc">Capture the entire stream from its start instead of only from the current moment</div></div>
-      <button class="sm-toggle" id="chRecordFromStart" onclick="toggleSetting(this)"></button>
-    </div>
     <div class="toggle-row" style="border-bottom:none">
       <div class="toggle-info"><div class="toggle-title">Delete original after convert</div><div class="toggle-desc">Remove source file after successful conversion</div></div>
       <button class="sm-toggle off" id="chDeleteOrig" onclick="toggleSetting(this)"></button>
+    </div>
+
+    <div class="modal-section">Authentication &amp; Network</div>
+    <div class="field">
+      <div class="field-lbl">Proxy URL <span style="color:var(--muted);font-weight:400;text-transform:none">(overrides global)</span></div>
+      <input class="field-input" id="chProxy" type="text" placeholder="http://user:pass@host:port or socks5://…">
+    </div>
+    <div class="field">
+      <div class="field-lbl">Cookies file <span style="color:var(--muted);font-weight:400;text-transform:none">(overrides global)</span></div>
+      <select class="field-input" id="chCookiesFile">
+        <option value="">None / use global</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <div class="field-lbl">Username</div>
+        <input class="field-input" id="chChUsername" type="text" placeholder="Site login username">
+      </div>
+      <div class="field">
+        <div class="field-lbl">Password</div>
+        <input class="field-input" id="chChPassword" type="password" placeholder="Site login password">
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-lbl">Extra yt-dlp args</div>
+      <input class="field-input" id="chExtraArgs" type="text" placeholder="e.g. --no-playlist --sub-langs en">
     </div>
 
     <div class="modal-actions">
@@ -875,33 +1024,43 @@ function navigate(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('page-' + page).classList.add('active');
-  document.getElementById('nav-' + page).classList.add('active');
+  const navEl = document.getElementById('nav-' + page);
+  if (navEl) navEl.classList.add('active');
   if (page === 'settings') loadSettings();
   if (page === 'recordings') { fetchRecordings(); fetchDisk(); }
+  if (page === 'platforms') fetchPlatforms();
 }
 
 // ── Platform detection ────────────────────────────────────────────────────────
 const PLAT_RE = [
-  [/youtube\.com|youtu\.be/i, 'YouTube', '🔴'],
-  [/twitch\.tv/i,             'Twitch',  '🟣'],
-  [/tiktok\.com/i,            'TikTok',  '⚫'],
-  [/kick\.com/i,              'Kick',    '🟢'],
-  [/bilibili\.com/i,          'Bilibili','🔵'],
-  [/douyin\.com/i,            'Douyin',  '⚫'],
-  [/huya\.com/i,              'Huya',    '🟠'],
-  [/douyu\.com/i,             'Douyu',   '🟠'],
-  [/afreecatv\.com/i,         'Afreeca', '🔵'],
-  [/sooplive\.co/i,           'Sooplive','🔵'],
-  [/naver\.com/i,             'Naver',   '🟢'],
-  [/nicovideo\.jp/i,          'Niconico','⚪'],
-  [/facebook\.com|fb\.watch/i,'Facebook','🔵'],
-  [/instagram\.com/i,         'Instagram','🟣'],
-  [/twitter\.com|x\.com/i,    'Twitter/X','⚫'],
-  [/vimeo\.com/i,             'Vimeo',   '🔵'],
-  [/rumble\.com/i,            'Rumble',  '🟢'],
-  [/stripchat\.com/i,         'Stripchat','🟣'],
-  [/twitcasting\.tv/i,        'Twitcasting','🔵'],
-  [/bigo\.tv/i,               'Bigo',    '🟣'],
+  [/youtube\.com|youtu\.be/i,  'YouTube',    '🔴'],
+  [/twitch\.tv/i,              'Twitch',     '🟣'],
+  [/tiktok\.com/i,             'TikTok',     '⚫'],
+  [/kick\.com/i,               'Kick',       '🟢'],
+  [/bilibili\.com/i,           'Bilibili',   '🔵'],
+  [/douyin\.com/i,             'Douyin',     '⚫'],
+  [/huya\.com/i,               'Huya',       '🟠'],
+  [/douyu\.com/i,              'Douyu',      '🟠'],
+  [/afreecatv\.com/i,          'Afreeca',    '🔵'],
+  [/sooplive\.co/i,            'Sooplive',   '🔵'],
+  [/naver\.com/i,              'Naver',      '🟢'],
+  [/nicovideo\.jp/i,           'Niconico',   '⚪'],
+  [/facebook\.com|fb\.watch/i, 'Facebook',   '🔵'],
+  [/instagram\.com/i,          'Instagram',  '🟣'],
+  [/twitter\.com|x\.com/i,     'Twitter/X',  '⚫'],
+  [/vimeo\.com/i,              'Vimeo',      '🔵'],
+  [/rumble\.com/i,             'Rumble',     '🟢'],
+  [/stripchat\.com/i,          'Stripchat',  '🟣'],
+  [/twitcasting\.tv/i,         'Twitcasting','🔵'],
+  [/bigo\.tv/i,                'Bigo',       '🟣'],
+  [/chaturbate\.com/i,         'Chaturbate', '🟠'],
+  [/cam4\.com/i,               'Cam4',       '🔴'],
+  [/myfreecams\.com/i,         'MyFreeCams', '🟢'],
+  [/camsoda\.com/i,            'CamSoda',    '🟠'],
+  [/bongacams\.com/i,          'BongaCams',  '🟡'],
+  [/cammodels\.com/i,          'CamModels',  '🟣'],
+  [/streamate\.com/i,          'Streamate',  '🔴'],
+  [/flirt4free\.com/i,         'Flirt4Free', '🟣'],
 ];
 
 function detectPlatform() {
@@ -944,12 +1103,18 @@ function openAddModal() {
   const recNow = document.getElementById('addRecordNow');
   if (globalSettings.record_on_add) { recNow.classList.remove('off'); }
   else { recNow.classList.add('off'); }
+  populateCookiesSelects();
   setTimeout(() => document.getElementById('addUrl').focus(), 80);
 }
 function closeAddModal() {
   document.getElementById('addOverlay').classList.remove('open');
   document.getElementById('addUrl').value = '';
   document.getElementById('addPlatformDetect').innerHTML = '';
+  document.getElementById('addProxy').value = '';
+  document.getElementById('addChUsername').value = '';
+  document.getElementById('addChPassword').value = '';
+  document.getElementById('addExtraArgs').value = '';
+  document.getElementById('addCookiesFile').value = '';
 }
 function overlayClick(e, id) {
   if (e.target === document.getElementById(id)) {
@@ -972,9 +1137,13 @@ async function confirmAdd() {
         format:           document.getElementById('addFormat').value,
         monitoring:       !document.getElementById('addMonitoring').classList.contains('off'),
         record_now:       !document.getElementById('addRecordNow').classList.contains('off'),
-        record_from_start: !document.getElementById('addRecordFromStart').classList.contains('off'),
         auto_convert_mp4: !document.getElementById('addAutoConvert').classList.contains('off'),
         delete_original:  !document.getElementById('addDeleteOrig').classList.contains('off'),
+        proxy:            document.getElementById('addProxy').value.trim(),
+        cookies_file:     document.getElementById('addCookiesFile').value,
+        username:         document.getElementById('addChUsername').value.trim(),
+        password:         document.getElementById('addChPassword').value,
+        extra_args:       document.getElementById('addExtraArgs').value.trim(),
       })
     });
     if (!res.ok) throw new Error(await res.text());
@@ -1000,7 +1169,14 @@ function openChSettings(chId) {
   setToggle('chMonitoring',  ch.monitoring !== false);
   setToggle('chAutoConvert', !!ch.auto_convert_mp4);
   setToggle('chDeleteOrig',  !!ch.delete_original);
-  setToggle('chRecordFromStart', ch.record_from_start !== false);
+  document.getElementById('chProxy').value = ch.proxy || '';
+  document.getElementById('chChUsername').value = ch.ch_username || '';
+  document.getElementById('chChPassword').value = ch.ch_password || '';
+  document.getElementById('chExtraArgs').value = ch.extra_args || '';
+  // Populate cookies dropdown
+  populateCookiesSelects().then(() => {
+    document.getElementById('chCookiesFile').value = ch.cookies_file || '';
+  });
   document.getElementById('chSettingsOverlay').classList.add('open');
 }
 function closeChSettings() {
@@ -1014,7 +1190,11 @@ async function saveChSettings() {
     monitoring:       !document.getElementById('chMonitoring').classList.contains('off'),
     auto_convert_mp4: !document.getElementById('chAutoConvert').classList.contains('off'),
     delete_original:  !document.getElementById('chDeleteOrig').classList.contains('off'),
-    record_from_start: !document.getElementById('chRecordFromStart').classList.contains('off'),
+    proxy:            document.getElementById('chProxy').value.trim() || null,
+    cookies_file:     document.getElementById('chCookiesFile').value || null,
+    username:         document.getElementById('chChUsername').value.trim() || null,
+    password:         document.getElementById('chChPassword').value || null,
+    extra_args:       document.getElementById('chExtraArgs').value.trim() || null,
   };
   // remove nulls
   Object.keys(body).forEach(k => body[k] === null && delete body[k]);
@@ -1039,7 +1219,15 @@ function setToggle(id, on) {
 async function recordChannel(chId) {
   try {
     const res = await fetch(`${API}/api/channels/${chId}/record`, { method: 'POST' });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      const body = await res.text();
+      if (res.status === 409 || body.includes('offline')) {
+        toast('Channel is offline', true);
+      } else {
+        toast('Error: ' + body, true);
+      }
+      return;
+    }
     toast('Recording started');
     fetchChannels();
   } catch(e) { toast('Error: ' + e.message, true); }
@@ -1240,6 +1428,14 @@ function renderCard(ch) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Recording
         </div>` : ''}
+        ${ch.proxy ? `<div class="proxy-badge" title="Proxy: ${esc(ch.proxy)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="10" height="10"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>
+          Proxy
+        </div>` : ''}
+        ${ch.cookies_file ? `<div class="proxy-badge" title="Cookies: ${esc(ch.cookies_file)}" style="color:var(--amber)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="10" height="10"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><circle cx="8" cy="14" r="1.5" fill="currentColor"/><circle cx="14" cy="8" r="1.5" fill="currentColor"/><circle cx="15" cy="16" r="1.5" fill="currentColor"/></svg>
+          Cookies
+        </div>` : ''}
         <div class="pill" style="color:var(--muted);margin-left:auto;font-size:10px">${timeAgo(ch.last_checked)}</div>
       </div>
     </div>
@@ -1353,8 +1549,13 @@ async function loadSettings() {
     setToggle('s-auto-convert',     !!s.auto_convert_mp4);
     setToggle('s-delete-original',  !!s.delete_original);
     setToggle('s-auto-retry',       s.auto_retry !== false);
-    document.getElementById('s-max-retries').value = s.max_retries ?? 5;
-    document.getElementById('s-retry-delay').value = s.retry_delay ?? 15;
+    document.getElementById('s-max-retries').value  = s.max_retries ?? 5;
+    document.getElementById('s-retry-delay').value  = s.retry_delay ?? 15;
+    document.getElementById('s-proxy').value        = s.proxy ?? '';
+    document.getElementById('s-extra-args').value   = s.extra_args ?? '';
+    await populateCookiesSelects();
+    document.getElementById('s-cookies-file').value = s.cookies_file ?? '';
+    loadCookiesList();
   } catch {}
 }
 
@@ -1369,6 +1570,9 @@ async function saveSettings() {
     auto_retry:       !document.getElementById('s-auto-retry').classList.contains('off'),
     max_retries:      parseInt(document.getElementById('s-max-retries').value) || 5,
     retry_delay:      parseInt(document.getElementById('s-retry-delay').value) || 15,
+    proxy:            document.getElementById('s-proxy').value.trim(),
+    cookies_file:     document.getElementById('s-cookies-file').value,
+    extra_args:       document.getElementById('s-extra-args').value.trim(),
   };
   try {
     await fetch(`${API}/api/settings`, {
@@ -1637,6 +1841,124 @@ function toast(msg, err=false) {
   el.classList.add('show');
   clearTimeout(toastT);
   toastT = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Platforms page ────────────────────────────────────────────────────────────
+let allPlatforms = [];
+
+async function fetchPlatforms() {
+  if (allPlatforms.length) { renderPlatforms(allPlatforms); return; }
+  try {
+    const res = await fetch(`${API}/api/platforms`);
+    allPlatforms = await res.json();
+    renderPlatforms(allPlatforms);
+  } catch {}
+}
+
+function renderPlatforms(list) {
+  document.getElementById('platform-count').textContent = list.length + ' platforms';
+  const grid = document.getElementById('platformsGrid');
+  grid.innerHTML = list.map(p => {
+    const textColor = p.color === '#53fc18' || p.color === '#ffffff' ? '#111' : '#fff';
+    return `<div class="plat-card">
+      <div class="plat-icon" style="background:${esc(p.color)};color:${textColor}">${esc(p.emoji)}</div>
+      <div class="plat-info">
+        <div class="plat-name">${esc(p.name)}</div>
+        <div class="plat-domain">${esc(p.domain)}</div>
+        <div class="plat-notes">${esc(p.notes)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterPlatforms() {
+  const q = document.getElementById('platSearchInput').value.toLowerCase();
+  document.querySelectorAll('.plat-card').forEach((card, i) => {
+    const p = allPlatforms[i];
+    if (!p) return;
+    const match = (p.name + p.domain + p.notes).toLowerCase().includes(q);
+    card.style.display = match ? '' : 'none';
+  });
+}
+
+// ── Cookies management ────────────────────────────────────────────────────────
+async function populateCookiesSelects() {
+  try {
+    const res = await fetch(`${API}/api/cookies`);
+    const files = await res.json();
+    const selects = ['s-cookies-file', 'addCookiesFile', 'chCookiesFile'];
+    selects.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const current = el.value;
+      const firstOpt = el.options[0];
+      el.innerHTML = '';
+      el.appendChild(firstOpt);
+      files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.filename;
+        opt.textContent = `${f.filename} (${fmtBytes(f.size)})`;
+        el.appendChild(opt);
+      });
+      el.value = current;
+    });
+  } catch {}
+}
+
+async function uploadCookies(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const status = document.getElementById('cookiesUploadStatus');
+  status.textContent = 'Uploading…';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`${API}/api/cookies/upload`, { method: 'POST', body: fd });
+    const data = await res.json();
+    status.textContent = `Uploaded: ${data.filename}`;
+    toast('Cookies file uploaded');
+    await populateCookiesSelects();
+    loadCookiesList();
+  } catch(e) {
+    status.textContent = 'Upload failed';
+    toast('Upload failed: ' + e.message, true);
+  }
+  input.value = '';
+}
+
+async function loadCookiesList() {
+  try {
+    const res = await fetch(`${API}/api/cookies`);
+    const files = await res.json();
+    const el = document.getElementById('cookiesList');
+    if (!el) return;
+    if (!files.length) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:4px 0">No cookies files uploaded yet.</div>';
+      return;
+    }
+    el.innerHTML = files.map(f => `
+      <div class="cookie-file-row">
+        <div>
+          <span class="cookie-file-name">${esc(f.filename)}</span>
+          <span class="cookie-file-size">${fmtBytes(f.size)}</span>
+        </div>
+        <button class="act-btn danger" title="Delete" onclick="deleteCookieFile('${esc(f.filename)}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>
+        </button>
+      </div>`).join('');
+  } catch {}
+}
+
+async function deleteCookieFile(filename) {
+  if (!confirm(`Delete cookies file "${filename}"?`)) return;
+  try {
+    await fetch(`${API}/api/cookies/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    toast('Cookies file deleted');
+    await populateCookiesSelects();
+    loadCookiesList();
+  } catch(e) { toast('Error: ' + e.message, true); }
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────

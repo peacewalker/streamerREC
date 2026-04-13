@@ -1,10 +1,35 @@
 services:
+
+  # ── WireProxy (SOCKS5 proxy over WireGuard) ───────────────────────────────────
+  # Turns your wg0.conf into a SOCKS5 proxy at socks5://wireproxy:1080
+  # Only channels that have the proxy field set will use it — everything else
+  # (YouTube, TikTok, Twitch) goes direct. No system-level routing changes.
+  wireproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.wireproxy
+    container_name: wireproxy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./wg0.conf:/etc/wireproxy/wg0.conf:ro
+    command: -c /etc/wireproxy/wg0.conf
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--timeout=5", "http://ifconfig.me"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── StreamRec ─────────────────────────────────────────────────────────────────
   streamrec:
     build: .
     container_name: streamrec
     restart: unless-stopped
     ports:
       - "8080:8080"
+    depends_on:
+      - wireproxy
     volumes:
       - ./recordings:/recordings
     deploy:
@@ -13,4 +38,5 @@ services:
           memory: 512M
           cpus: "3.0"
     environment:
-      - STREAMREC_PI_MODE=1
+      - RECORDINGS_DIR=/recordings
+      - STATIC_DIR=/app
