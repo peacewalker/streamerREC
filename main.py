@@ -214,7 +214,7 @@ def _save_state_sync():
 def _save_state():
     """Save state — debounced in async context, immediate otherwise."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()  # check if we're in an async context
         _schedule_save_state()
     except RuntimeError:
         # No running event loop (startup / sync context) — write immediately

@@ -1603,6 +1603,8 @@ async function saveSettings() {
       method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
     });
     toast('Settings saved');
+    // Re-fetch poll interval in case Pi mode was toggled
+    initPolling();
   } catch(e) { toast('Error: ' + e.message, true); }
 }
 
@@ -1988,6 +1990,15 @@ async function deleteCookieFile(filename) {
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
 let pollInterval = 5000;  // default; adjusted after version fetch
+let pollTimer = null;
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    fetchChannels();
+    if (activeLogChId) refreshLog();
+  }, pollInterval);
+}
 
 async function initPolling() {
   try {
@@ -1995,16 +2006,12 @@ async function initPolling() {
     const data = await res.json();
     if (data.poll_interval) pollInterval = data.poll_interval * 1000;
   } catch {}
+  startPolling();
 }
 
 fetchChannels();
 loadSettings();
 initPolling();
-
-setInterval(() => {
-  fetchChannels();
-  if (activeLogChId) refreshLog();
-}, pollInterval);
 
 // Tick recording durations every second without a full fetch
 setInterval(() => {
