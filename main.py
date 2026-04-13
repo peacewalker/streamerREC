@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import platform as _platform
 import re
@@ -10,14 +11,24 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("streamrec")
 
 # ── Platform detection ────────────────────────────────────────────────────────
 IS_WINDOWS = _platform.system() == "Windows"
@@ -39,8 +50,21 @@ COOKIES_DIR.mkdir(exist_ok=True)
 # Static files: Docker puts index.html in /app, bare metal uses same dir as main.py
 _static_dir = os.environ.get("STATIC_DIR", str(Path(__file__).parent))
 
+# ── Version ───────────────────────────────────────────────────────────────────
+VERSION = "1.0.0"
+
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="StreamRec API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_state()
+    logger.info("StreamRec %s starting — %d channels loaded", VERSION, len(channels))
+    task = asyncio.create_task(monitor_loop())
+    yield
+    task.cancel()
+    logger.info("StreamRec shutting down")
+
+app = FastAPI(title="StreamRec API", version=VERSION, lifespan=lifespan)
 
 _proc_semaphore = asyncio.Semaphore(3 if PI_MODE else 6)
 
@@ -127,8 +151,8 @@ def _save_state():
             encoding="utf-8",
         )
         tmp.replace(STATE_FILE)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to save state: %s", e)
 
 
 def _load_state():
@@ -159,8 +183,8 @@ def _load_state():
             rec.pop("stopping", None)
             rec.pop("speed", None)
             recordings[rid] = rec
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load state: %s", e)
 
 
 # ── Platform detection ────────────────────────────────────────────────────────
@@ -211,7 +235,6 @@ def detect_platform(url: str) -> str:
 def _username_from_url(url: str) -> str:
     """Best-effort username extraction directly from the URL path."""
     try:
-        from urllib.parse import urlparse
         path = urlparse(url).path.strip("/")
         # Take first non-empty path segment
         part = path.split("/")[0] if path else ""
@@ -500,6 +523,7 @@ async def run_recording(rec_id: str):
     rec["started_at"] = time.time()
     rec["log"]        = []
     size_task         = None
+    logger.info("Recording started: %s for %s (%s)", rec_id, username, url)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -593,10 +617,14 @@ async def run_recording(rec_id: str):
         rec["status"] = "completed" if (rc == 0 or rec.get("stopping") or file_captured) else "error"
         if rc != 0 and not rec.get("stopping") and not file_captured:
             rec["error"] = f"Exit code {rc}"
+            logger.warning("Recording %s failed with exit code %d", rec_id, rc)
+        else:
+            logger.info("Recording %s completed", rec_id)
 
     except Exception as e:
         rec["status"] = "error"
         rec["error"]  = str(e)
+        logger.error("Recording %s exception: %s", rec_id, e)
 
     finally:
         if size_task:
@@ -715,6 +743,8 @@ async def monitor_loop():
     while True:
         interval = settings.get("monitor_interval", 60)
         await asyncio.sleep(interval)
+        monitored_count = sum(1 for c in channels.values() if c.get("monitoring", True))
+        logger.debug("Monitor tick — checking %d channels", monitored_count)
         for ch_id, ch in list(channels.items()):
             if not ch.get("monitoring", True):
                 continue
@@ -730,15 +760,10 @@ async def monitor_loop():
             channels[ch_id]["is_live"]      = is_live
             channels[ch_id]["last_checked"] = time.time()
             if is_live:
+                logger.info("Channel %s is live — starting auto-record", ch_id)
                 rec_id = await _start_recording_for_channel(ch_id)
                 if rec_id:
                     recordings[rec_id]["auto"] = True
-
-
-@app.on_event("startup")
-async def startup():
-    _load_state()
-    asyncio.create_task(monitor_loop())
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -808,6 +833,10 @@ def _stop_rec(rec: dict, force: bool = False):
 
 @app.post("/api/channels")
 async def add_channel(req: AddChannelRequest):
+    # Validate URL — must be http/https to prevent SSRF
+    parsed = urlparse(req.url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(400, "Invalid URL — must start with http:// or https://")
     ch_id    = str(uuid.uuid4())[:8]
     platform = detect_platform(req.url)
     ch = {
@@ -844,6 +873,7 @@ async def add_channel(req: AddChannelRequest):
     if req.record_now:
         asyncio.create_task(_start_recording_for_channel(ch_id))
     _save_state()
+    logger.info("Channel added: %s (%s) [%s]", ch_id, platform, req.url)
     return {"id": ch_id, "platform": platform}
 
 
@@ -956,6 +986,7 @@ async def delete_channel(ch_id: str):
     if rec_id and rec_id in recordings:
         _stop_rec(recordings[rec_id], force=False)
     _save_state()
+    logger.info("Channel deleted: %s", ch_id)
     return {"ok": True}
 
 
@@ -1175,6 +1206,11 @@ async def list_platforms():
 @app.get("/api/health")
 async def health():
     return {"ok": True, "channels": len(channels), "recordings": len(recordings)}
+
+
+@app.get("/api/version")
+async def version():
+    return {"version": VERSION}
 
 
 @app.get("/api/disk")

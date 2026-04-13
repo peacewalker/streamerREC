@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="StreamRec" \
+      org.opencontainers.image.description="Self-hosted live stream recorder with web UI" \
+      org.opencontainers.image.source="https://github.com/orhogi/streamerREC" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \

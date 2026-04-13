@@ -32,11 +32,14 @@ services:
       - wireproxy
     volumes:
       - ./recordings:/recordings
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "3.0"
+    # Uncomment the deploy block below to limit resources (recommended for Raspberry Pi)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 512M
+    #       cpus: "3.0"
     environment:
       - RECORDINGS_DIR=/recordings
       - STATIC_DIR=/app
+      # Uncomment the line below to enable Raspberry Pi / low-power mode
+      # - STREAMREC_PI_MODE=1

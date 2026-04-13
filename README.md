@@ -4,13 +4,14 @@
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/yt--dlp-latest-red?logo=youtube&logoColor=white" alt="yt-dlp">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/platforms-30+-purple" alt="30+ Platforms">
 </p>
 
 <h1 align="center">🔴 StreamRec</h1>
 
 <p align="center">
   <strong>Self-hosted live stream recorder with a beautiful web UI.</strong><br>
-  Automatically monitor and record live streams from 20+ platforms — all from a single dashboard.
+  Automatically monitor and record live streams from 30+ platforms — all from a single dashboard.
 </p>
 
 <p align="center">
@@ -19,10 +20,29 @@
 
 ---
 
+## 📑 Table of Contents
+
+- [Features](#-features)
+- [Screenshots](#-screenshots)
+- [Getting Started](#-getting-started)
+- [Updating](#-updating)
+- [VPN / Proxy Setup](#-vpn--proxy-setup)
+- [Cookies / Age-Restricted Streams](#-cookies--age-restricted-streams)
+- [Configuration](#-configuration)
+- [Architecture](#️-architecture)
+- [Project Structure](#-project-structure)
+- [API Reference](#-api-reference)
+- [Raspberry Pi / Low-Power Devices](#-raspberry-pi--low-power-devices)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+---
+
 ## ✨ Features
 
 ### 🌍 Multi-Platform Support
-Record live streams from **20+ platforms** including:
+Record live streams from **30+ platforms** including:
 
 | Platform | Platform | Platform | Platform |
 |----------|----------|----------|----------|
@@ -32,7 +52,8 @@ Record live streams from **20+ platforms** including:
 | Douyin | Huya | Douyu | Afreeca |
 | Sooplive | Naver | Weibo | Bigo |
 | Twitcasting | Pandalive | Stripchat | Chaturbate |
-| Cam4 | MyFreeCams | BongaCams | _…and more via yt-dlp_ |
+| Cam4 | MyFreeCams | BongaCams | CamSoda |
+| CamModels | Streamate | Flirt4Free | _…and more via yt-dlp_ |
 
 ### 🎯 Core Capabilities
 - **Automatic Live Detection** — Periodically checks if a channel is live and starts recording automatically
@@ -70,35 +91,30 @@ Record live streams from **20+ platforms** including:
 
 ## 📸 Screenshots
 
-<details>
-<summary><strong>🌙 Dark Mode – Channels</strong></summary>
-<br>
+### 🌙 Dark Mode — Channels
+> The main dashboard showing all monitored channels with live status, recording controls, and real-time stats.
+
 <img src="https://github.com/user-attachments/assets/e277c969-f4be-41cf-86d8-159a5b0687d4" alt="Channels page in dark mode" width="100%">
-</details>
 
-<details>
-<summary><strong>☀️ Light Mode – Channels</strong></summary>
-<br>
+### ☀️ Light Mode — Channels
+> The same channel dashboard in light theme — switch with one click.
+
 <img src="https://github.com/user-attachments/assets/167226bf-1b10-4a1a-96c4-94f0deb13a64" alt="Channels page in light mode" width="100%">
-</details>
 
-<details>
-<summary><strong>⚙️ Settings</strong></summary>
-<br>
-<img src="https://github.com/user-attachments/assets/d1d5b426-061a-4496-8a88-49d0225336bd" alt="Settings page" width="100%">
-</details>
+### ➕ Add Channel
+> Add any channel by pasting a URL — StreamRec auto-detects the platform and fetches metadata.
 
-<details>
-<summary><strong>➕ Add Channel</strong></summary>
-<br>
 <img src="https://github.com/user-attachments/assets/3dd39816-a93b-4f0f-afbc-8295cf857661" alt="Add channel modal" width="100%">
-</details>
 
-<details>
-<summary><strong>🎬 Recordings</strong></summary>
-<br>
+### ⚙️ Settings
+> Configure global defaults, proxy, cookies, auto-retry behavior, and more.
+
+<img src="https://github.com/user-attachments/assets/d1d5b426-061a-4496-8a88-49d0225336bd" alt="Settings page" width="100%">
+
+### 🎬 Recordings
+> Browse, preview, download, or delete completed recordings — all from the web UI.
+
 <img src="https://github.com/user-attachments/assets/008ac8ca-59a8-4d3e-ac2a-3a30ec377bf5" alt="Recordings page" width="100%">
-</details>
 
 ---
 
@@ -147,6 +163,31 @@ docker run -d \
 pip install -r requirements.txt
 mkdir -p recordings
 uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+---
+
+## 🔄 Updating
+
+### Docker
+
+```bash
+cd streamerREC
+git pull
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+Your channels, settings, and completed recordings are stored in `./recordings/state.json` and will persist across updates.
+
+### Manual
+
+```bash
+cd streamerREC
+git pull
+pip install -r requirements.txt --upgrade
+# Restart the server
 ```
 
 ---
@@ -294,6 +335,7 @@ streamerREC/
 ├── Dockerfile.wireproxy # Wireproxy sidecar image
 ├── docker-compose.yml   # Docker Compose service configuration
 ├── requirements.txt     # Python dependencies
+├── LICENSE              # MIT License
 └── README.md
 ```
 
@@ -340,6 +382,7 @@ streamerREC/
 | `GET` | `/api/settings` | Get current settings |
 | `PATCH` | `/api/settings` | Update settings |
 | `GET` | `/api/health` | Health check |
+| `GET` | `/api/version` | Get StreamRec version |
 | `GET` | `/api/disk` | Disk usage stats |
 | `GET` | `/api/export` | Export configuration |
 | `POST` | `/api/import` | Import configuration |
@@ -358,16 +401,79 @@ environment:
 When enabled:
 - Concurrent subprocess limit reduced from 6 → 3
 - Default monitor interval increased from 60s → 120s
-- Docker resource limits: 512 MB RAM, 3 CPU cores
+
+> **Tip:** Uncomment the `deploy.resources.limits` section in `docker-compose.yml` to also limit RAM and CPU usage.
+
+---
+
+## ❓ Troubleshooting
+
+<details>
+<summary><strong>Stream is live but not detected</strong></summary>
+
+- Check that the URL is correct and accessible from your server
+- If the channel is geo-blocked, set up a [proxy or VPN](#-vpn--proxy-setup)
+- Try increasing the check interval in Settings if you have many channels
+- Use the **Refresh** button on the channel card to manually re-check
+
+</details>
+
+<details>
+<summary><strong>Recording starts but file is 0 bytes or very small</strong></summary>
+
+- Some platforms require cookies for full access — see [Cookies setup](#-cookies--age-restricted-streams)
+- Try changing the recording quality (some streams don't support all quality levels)
+- Check the recording log (click the channel card → view log) for error details
+
+</details>
+
+<details>
+<summary><strong>Container won't start / port conflict</strong></summary>
+
+- Make sure port 8080 isn't already in use: `lsof -i :8080`
+- Change the port mapping in `docker-compose.yml`: `"3000:8080"` to use port 3000 instead
+- Check Docker logs: `docker compose logs streamrec`
+
+</details>
+
+<details>
+<summary><strong>wireproxy container keeps restarting</strong></summary>
+
+- Make sure `wg0.conf` exists and is valid
+- If you don't need the VPN feature, you can comment out the `wireproxy` service and the `depends_on` line in `docker-compose.yml`
+
+</details>
+
+<details>
+<summary><strong>yt-dlp errors / unsupported site</strong></summary>
+
+- Rebuild the Docker image to get the latest yt-dlp: `docker compose build --no-cache`
+- For manual installs, update yt-dlp: `pip install -U yt-dlp`
+- Check [yt-dlp supported sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) for compatibility
+
+</details>
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Feel free to open an issue or submit a pull request.
+Contributions are welcome! Here's how to get started:
+
+1. **Fork** this repository
+2. **Create** a feature branch: `git checkout -b my-feature`
+3. **Commit** your changes: `git commit -m "Add my feature"`
+4. **Push** to the branch: `git push origin my-feature`
+5. **Open** a pull request
+
+### Ideas for contributions
+- 🌐 Add translations / i18n support
+- 📱 Improve mobile responsiveness
+- 🔔 Add notification integrations (Discord, Telegram, etc.)
+- 🧪 Add test coverage
+- 📊 Add recording analytics / statistics page
 
 ---
 
 ## 📄 License
 
-This project is open source. See the repository for license details.
+This project is licensed under the [MIT License](LICENSE).
