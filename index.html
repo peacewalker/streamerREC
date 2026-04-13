@@ -114,7 +114,9 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 .ch-card {
   background: var(--s1); border: 1px solid var(--border); border-radius: 12px;
   overflow: hidden; transition: border-color 0.15s; cursor: default;
-  contain: layout style;
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 340px;
 }
 .ch-card:hover { border-color: var(--border2); }
 .ch-card.is-live { border-color: rgba(239,68,68,0.35); }
@@ -578,7 +580,7 @@ html.light .plat-tiktok { background: #333; }
       <div class="topbar-right">
         <div class="search-wrap">
           <span class="search-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-          <input class="search-input" id="searchInput" placeholder="Search channels…" oninput="filterCards()">
+          <input class="search-input" id="searchInput" placeholder="Search channels…" oninput="debouncedFilterCards()">
         </div>
         <button class="add-btn" onclick="openAddModal()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -817,7 +819,7 @@ html.light .plat-tiktok { background: #333; }
       <div class="topbar-right">
         <div class="search-wrap">
           <span class="search-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-          <input class="search-input" id="platSearchInput" placeholder="Search platforms…" oninput="filterPlatforms()">
+          <input class="search-input" id="platSearchInput" placeholder="Search platforms…" oninput="debouncedFilterPlatforms()">
         </div>
       </div>
     </div>
@@ -1313,6 +1315,12 @@ async function refreshLog() {
   } catch {}
 }
 
+// ── Debounce helper ───────────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let t;
+  return function(...args) { clearTimeout(t); t = setTimeout(() => fn.apply(this, args), ms); };
+}
+
 // ── Render ─────────────────────────────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -1524,6 +1532,7 @@ function filterCards() {
     card.style.display = match ? '' : 'none';
   });
 }
+const debouncedFilterCards = debounce(filterCards, 150);
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 async function fetchChannels() {
@@ -1880,6 +1889,7 @@ function filterPlatforms() {
     card.style.display = match ? '' : 'none';
   });
 }
+const debouncedFilterPlatforms = debounce(filterPlatforms, 150);
 
 // ── Cookies management ────────────────────────────────────────────────────────
 async function populateCookiesSelects() {
@@ -1962,12 +1972,24 @@ async function deleteCookieFile(filename) {
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
+let _pollInterval = 5000;  // default; adjusted after version fetch
+
+async function initPolling() {
+  try {
+    const res = await fetch(`${API}/api/version`);
+    const data = await res.json();
+    if (data.poll_interval) _pollInterval = data.poll_interval * 1000;
+  } catch {}
+}
+
 fetchChannels();
 loadSettings();
+initPolling();
+
 setInterval(() => {
   fetchChannels();
   if (activeLogChId) refreshLog();
-}, 5000);
+}, _pollInterval > 5000 ? _pollInterval : 5000);
 
 // Tick recording durations every second without a full fetch
 setInterval(() => {

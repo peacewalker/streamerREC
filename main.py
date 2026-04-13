@@ -74,6 +74,32 @@ recordings: dict[str, dict] = {}
 _disk_cache:    dict  = {}
 _disk_cache_ts: float = 0
 
+# ── Tuning knobs (Pi vs. normal) ─────────────────────────────────────────────
+_SIZE_POLL_INTERVAL   = 8  if PI_MODE else 3     # seconds between file-size polls
+_LOG_BUFFER_MAX       = 60 if PI_MODE else 100   # max log lines before trim
+_LOG_BUFFER_TRIM      = 30 if PI_MODE else 50    # lines kept after trim
+_FRONTEND_POLL_HINT   = 10 if PI_MODE else 5     # suggested poll interval for UI
+_DISK_CACHE_TTL       = 60 if PI_MODE else 30    # disk usage cache lifetime (seconds)
+
+# ── Debounced state persistence ──────────────────────────────────────────────
+_save_state_pending = False
+_save_state_task:   Optional[asyncio.Task] = None
+
+def _schedule_save_state():
+    """Debounce state saves — collapse rapid writes into one disk write."""
+    global _save_state_pending, _save_state_task
+    _save_state_pending = True
+    if _save_state_task and not _save_state_task.done():
+        return  # already scheduled
+    _save_state_task = asyncio.get_event_loop().create_task(_debounced_save())
+
+async def _debounced_save():
+    global _save_state_pending
+    await asyncio.sleep(2)  # wait 2s for more writes to coalesce
+    if _save_state_pending:
+        _save_state_pending = False
+        _save_state_sync()
+
 settings: dict = {
     "monitor_interval": 120 if PI_MODE else 60,
     "default_quality":  "best",
@@ -128,7 +154,8 @@ def _kill_proc(pid: int, force: bool = False) -> None:
 
 # ── State persistence ─────────────────────────────────────────────────────────
 
-def _save_state():
+def _save_state_sync():
+    """Write state to disk immediately (internal — prefer _save_state)."""
     saved_channels = {}
     for cid, ch in channels.items():
         c = dict(ch)
@@ -153,6 +180,16 @@ def _save_state():
         tmp.replace(STATE_FILE)
     except Exception as e:
         logger.warning("Failed to save state: %s", e)
+
+
+def _save_state():
+    """Save state — debounced in async context, immediate otherwise."""
+    try:
+        loop = asyncio.get_running_loop()
+        _schedule_save_state()
+    except RuntimeError:
+        # No running event loop (startup / sync context) — write immediately
+        _save_state_sync()
 
 
 def _load_state():
@@ -472,17 +509,23 @@ async def run_recording(rec_id: str):
     cmd = ["yt-dlp", "--no-part"]
     if platform not in _no_live_from_start:
         cmd += ["--live-from-start", "--hls-use-mpegts"]
+
+    # Limit ffmpeg thread count — critical for Pi / low-power CPUs
+    ffmpeg_threads = "1" if PI_MODE else "2"
     cmd += [
         "--retries", "infinite", "--fragment-retries", "infinite",
         "--retry-sleep", "5", "--socket-timeout", "30",
         "--no-warnings", "--newline",
         "--concurrent-fragments", "1",
         "--fixup", "force",
-        "--downloader-args", "ffmpeg:-threads 2 -fflags +genpts+discardcorrupt",
+        "--downloader-args", f"ffmpeg:-threads {ffmpeg_threads} -fflags +genpts+discardcorrupt",
         "-f", effective_quality,
         "--merge-output-format", fmt,
         "--progress", "--print", "after_move:filepath",
     ]
+    # On Pi / low-memory systems, cap the download buffer to reduce RAM usage
+    if PI_MODE:
+        cmd += ["--buffer-size", "32K"]
     # Chaturbate (and similar HLS cam sites) have audio segments that start
     # exactly 1 second ahead of video — delay audio by 1s to compensate.
     if platform in _cam_platforms:
@@ -538,7 +581,7 @@ async def run_recording(rec_id: str):
             last_bytes = 0
             last_time = time.time()
             while True:
-                await asyncio.sleep(3)
+                await asyncio.sleep(_SIZE_POLL_INTERVAL)
                 for f in rec_dir.glob(f"{stem}.*"):
                     try:
                         sz = f.stat().st_size
@@ -571,8 +614,8 @@ async def run_recording(rec_id: str):
                 if not line:
                     continue
                 rec["log"].append(line)
-                if len(rec["log"]) > 100:
-                    rec["log"] = rec["log"][-50:]
+                if len(rec["log"]) > _LOG_BUFFER_MAX:
+                    rec["log"] = rec["log"][-_LOG_BUFFER_TRIM:]
                 # ffmpeg progress line (HLS via ffmpeg downloader):
                 # "frame= 49 fps=0.0 size=  256KiB time=00:00:01 bitrate=1279.8kbits/s speed= 3.2x"
                 if "frame=" in line and "bitrate=" in line:
@@ -653,7 +696,7 @@ async def run_recording(rec_id: str):
             try:
                 fix_proc = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-i", fp, "-c", "copy", "-movflags", "+faststart",
-                    "-threads", "2", fixed_path, "-y",
+                    "-threads", ffmpeg_threads, fixed_path, "-y",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -681,7 +724,7 @@ async def run_recording(rec_id: str):
             mp4_path = str(Path(fp).with_suffix(".mp4"))
             try:
                 conv = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-i", fp, "-c", "copy", "-threads", "2",
+                    "ffmpeg", "-i", fp, "-c", "copy", "-threads", ffmpeg_threads,
                     mp4_path, "-y",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
@@ -1210,14 +1253,18 @@ async def health():
 
 @app.get("/api/version")
 async def version():
-    return {"version": VERSION}
+    return {
+        "version": VERSION,
+        "pi_mode": PI_MODE,
+        "poll_interval": _FRONTEND_POLL_HINT,
+    }
 
 
 @app.get("/api/disk")
 async def disk_usage():
     global _disk_cache, _disk_cache_ts
     now = time.time()
-    if _disk_cache and now - _disk_cache_ts < 30:
+    if _disk_cache and now - _disk_cache_ts < _DISK_CACHE_TTL:
         return _disk_cache
     try:
         usage     = shutil.disk_usage(str(RECORDINGS_DIR))
