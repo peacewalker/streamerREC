@@ -1,9 +1,13 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import platform as _platform
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -43,9 +47,12 @@ else:
     RECORDINGS_DIR = Path.home() / "StreamRec" / "recordings"
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE  = RECORDINGS_DIR / "state.json"
-COOKIES_DIR = RECORDINGS_DIR / "cookies"
+STATE_FILE   = RECORDINGS_DIR / "state.json"
+COOKIES_DIR  = RECORDINGS_DIR / "cookies"
 COOKIES_DIR.mkdir(exist_ok=True)
+ACCOUNT_FILE = RECORDINGS_DIR / "account.json"
+AVATAR_DIR   = RECORDINGS_DIR / "avatars"
+AVATAR_DIR.mkdir(exist_ok=True)
 
 # Static files: Docker puts index.html in /app, bare metal uses same dir as main.py
 _static_dir = os.environ.get("STATIC_DIR", str(Path(__file__).parent))
@@ -59,10 +66,31 @@ VERSION = "1.0.0"
 async def lifespan(app: FastAPI):
     _load_state()
     logger.info("StreamRec %s starting — %d channels loaded", VERSION, len(channels))
-    task = asyncio.create_task(monitor_loop())
+    task = asyncio.create_task(_supervised_monitor())
     yield
     task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    # Drain any active recordings so we don't leave zombie yt-dlp children behind
+    for rec in list(recordings.values()):
+        if rec.get("status") in ("recording", "starting") and rec.get("pid"):
+            _stop_rec(rec, force=False)
+    _save_state_sync()
     logger.info("StreamRec shutting down")
+
+
+async def _supervised_monitor():
+    """Keep the monitor loop alive even if a single tick raises unexpectedly."""
+    while True:
+        try:
+            await monitor_loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("monitor_loop crashed: %s — restarting in 10s", e)
+            await asyncio.sleep(10)
 
 app = FastAPI(title="StreamRec API", version=VERSION, lifespan=lifespan)
 
@@ -442,25 +470,37 @@ async def check_is_live(url: str, proxy: str = "") -> bool:
         if result is not None:
             return result
 
+    cmd = ["yt-dlp", "--simulate", "--no-warnings",
+           "--socket-timeout", "20", "--playlist-items", "1"]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(url)
+    proc = None
     try:
+        # Hold the semaphore across the full wait so the process cap is real.
         async with _proc_semaphore:
-            cmd = ["yt-dlp", "--simulate", "--no-warnings",
-                   "--socket-timeout", "20", "--playlist-items", "1"]
-            if proxy:
-                cmd += ["--proxy", proxy]
-            cmd.append(url)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=35)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return False
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=35)
+            except asyncio.TimeoutError:
+                _kill_proc(proc.pid, force=True)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
+                return False
         return proc.returncode == 0
-    except Exception:
+    except Exception as e:
+        logger.debug("check_is_live error for %s: %s", url, e)
+        if proc and proc.returncode is None:
+            try:
+                _kill_proc(proc.pid, force=True)
+            except Exception:
+                pass
         return False
 
 
@@ -595,7 +635,18 @@ async def run_recording(rec_id: str):
     rec["started_at"] = time.time()
     rec["log"]        = []
     size_task         = None
+    proc              = None
+    file_captured     = False  # pre-init so `finally` can read it even if we fail early
     logger.info("Recording started: %s for %s (%s)", rec_id, username, url)
+
+    # If a stop/kill was requested before the task got scheduled, bail out now.
+    if rec.get("stopping"):
+        rec["status"]   = "completed"
+        rec["ended_at"] = time.time()
+        if (ch_id := rec.get("channel_id")) and ch_id in channels:
+            channels[ch_id]["recording_id"] = None
+        _save_state()
+        return
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -605,6 +656,9 @@ async def run_recording(rec_id: str):
             **_subprocess_kwargs(),
         )
         rec["pid"] = proc.pid
+        # Race: stop was requested between starting and pid assignment — kill now.
+        if rec.get("stopping"):
+            _kill_proc(proc.pid, force=False)
 
         async def _poll_size():
             last_bytes = 0
@@ -694,6 +748,11 @@ async def run_recording(rec_id: str):
         else:
             logger.info("Recording %s completed", rec_id)
 
+    except asyncio.CancelledError:
+        rec["status"]   = "completed" if rec.get("stopping") else "error"
+        if not rec.get("stopping"):
+            rec["error"] = "Cancelled"
+        raise
     except Exception as e:
         rec["status"] = "error"
         rec["error"]  = str(e)
@@ -702,6 +761,20 @@ async def run_recording(rec_id: str):
     finally:
         if size_task:
             size_task.cancel()
+        # Make sure we never leave an orphaned yt-dlp subprocess running
+        if proc is not None and proc.returncode is None:
+            try:
+                _kill_proc(proc.pid, force=False)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    _kill_proc(proc.pid, force=True)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
+            except Exception:
+                pass
         rec["ended_at"] = time.time()
         rec.pop("pid", None)
 
@@ -776,10 +849,13 @@ async def run_recording(rec_id: str):
             except Exception:
                 pass
 
+        # Only clear the channel's recording pointer if it still points at US —
+        # a subsequent Record click could have already started a new rec_id.
         if ch_id := rec.get("channel_id"):
-            if ch_id in channels:
-                channels[ch_id]["recording_id"] = None
-                channels[ch_id]["is_live"]      = False
+            ch_entry = channels.get(ch_id)
+            if ch_entry and ch_entry.get("recording_id") == rec_id:
+                ch_entry["recording_id"] = None
+                ch_entry["is_live"]      = False
 
         _save_state()
 
@@ -816,31 +892,61 @@ async def run_recording(rec_id: str):
 
 # ── Monitor loop ──────────────────────────────────────────────────────────────
 
+async def _check_one_channel(ch_id: str) -> None:
+    """Check a single channel's live state and auto-record if needed.
+
+    Runs per-channel error handling so one bad URL can't take down the tick.
+    """
+    ch = channels.get(ch_id)
+    if not ch or not ch.get("monitoring", True):
+        return
+    existing = ch.get("recording_id")
+    if existing and existing in recordings:
+        r = recordings[existing]
+        if r.get("status") in ("recording", "starting"):
+            # Still recording — no need to re-check, just mark live
+            if ch_id in channels:
+                channels[ch_id]["is_live"]      = True
+                channels[ch_id]["last_checked"] = time.time()
+            return
+
+    proxy = ch.get("proxy") or settings.get("proxy", "")
+    try:
+        is_live = await check_is_live(ch["url"], proxy=proxy)
+    except Exception as e:
+        logger.warning("Live check failed for %s (%s): %s", ch_id, ch.get("url"), e)
+        return
+
+    # Channel could have been deleted while we were awaiting
+    if ch_id not in channels:
+        return
+    channels[ch_id]["is_live"]      = is_live
+    channels[ch_id]["last_checked"] = time.time()
+    if is_live and not channels[ch_id].get("recording_id"):
+        logger.info("Channel %s is live — starting auto-record", ch_id)
+        try:
+            rec_id = await _start_recording_for_channel(ch_id)
+        except Exception as e:
+            logger.exception("Failed to start auto-record for %s: %s", ch_id, e)
+            return
+        if rec_id and rec_id in recordings:
+            recordings[rec_id]["auto"] = True
+
+
 async def monitor_loop():
     while True:
-        interval = settings.get("monitor_interval", 60)
+        interval = max(5, int(settings.get("monitor_interval", 60)))
         await asyncio.sleep(interval)
-        monitored_count = sum(1 for c in channels.values() if c.get("monitoring", True))
-        logger.debug("Monitor tick — checking %d channels", monitored_count)
-        for ch_id, ch in list(channels.items()):
-            if not ch.get("monitoring", True):
-                continue
-            existing = ch.get("recording_id")
-            if existing and existing in recordings:
-                r = recordings[existing]
-                if r["status"] in ("recording", "starting"):
-                    channels[ch_id]["is_live"]      = True
-                    channels[ch_id]["last_checked"] = time.time()
-                    continue
-            proxy   = ch.get("proxy") or settings.get("proxy", "")
-            is_live = await check_is_live(ch["url"], proxy=proxy)
-            channels[ch_id]["is_live"]      = is_live
-            channels[ch_id]["last_checked"] = time.time()
-            if is_live:
-                logger.info("Channel %s is live — starting auto-record", ch_id)
-                rec_id = await _start_recording_for_channel(ch_id)
-                if rec_id:
-                    recordings[rec_id]["auto"] = True
+        ids = [cid for cid, c in channels.items() if c.get("monitoring", True)]
+        if not ids:
+            continue
+        logger.debug("Monitor tick — checking %d channels", len(ids))
+        # Run per-channel checks concurrently; gather never raises because
+        # each coroutine traps its own exceptions.
+        await asyncio.gather(
+            *(_check_one_channel(cid) for cid in ids),
+            return_exceptions=True,
+        )
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -1216,11 +1322,20 @@ async def update_settings(req: UpdateSettingsRequest):
 
 # ── Cookies endpoints ─────────────────────────────────────────────────────────
 
+MAX_COOKIES_SIZE = 5 * 1024 * 1024   # 5 MiB — cookies files are tiny in practice
+
+
 @app.post("/api/cookies/upload")
 async def upload_cookies(file: UploadFile = File(...)):
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
+    if len(content) > MAX_COOKIES_SIZE:
+        raise HTTPException(
+            413, f"File too large — max {MAX_COOKIES_SIZE // 1024} KiB"
+        )
     safe_name = re.sub(r'[^\w\-\.]', '_', file.filename or "cookies.txt")
     dest      = COOKIES_DIR / safe_name
-    content   = await file.read()
     dest.write_bytes(content)
     return {"ok": True, "filename": safe_name, "size": len(content)}
 
@@ -1352,6 +1467,248 @@ async def import_config(req: ImportRequest):
             settings[k] = v
     _save_state()
     return {"ok": True, "imported_channels": imported}
+
+
+# ── Account (local user profile) ──────────────────────────────────────────────
+#
+# A single local profile stored at RECORDINGS_DIR/account.json.  The password is
+# hashed with PBKDF2-HMAC-SHA256 (200k iterations) over a 32-byte random salt —
+# the plaintext password is never written to disk.  Username is stored in the
+# clear so the UI can greet the user, but the file is chmod 600 on Unix and
+# lives in the private recordings dir on Windows.
+
+PBKDF2_ITERATIONS = 200_000
+MAX_AVATAR_SIZE   = 2 * 1024 * 1024   # 2 MiB
+_AVATAR_MIME = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _hash_password(password: str, salt: Optional[bytes] = None) -> tuple[str, str]:
+    if salt is None:
+        salt = secrets.token_bytes(32)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
+    )
+    return digest.hex(), salt.hex()
+
+
+def _verify_password(password: str, hex_hash: str, hex_salt: str) -> bool:
+    try:
+        salt = bytes.fromhex(hex_salt)
+    except ValueError:
+        return False
+    cand, _ = _hash_password(password, salt)
+    return hmac.compare_digest(cand, hex_hash)
+
+
+def _load_account() -> Optional[dict]:
+    if not ACCOUNT_FILE.exists():
+        return None
+    try:
+        return json.loads(ACCOUNT_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to load account: %s", e)
+        return None
+
+
+def _save_account(acc: dict) -> None:
+    try:
+        tmp = ACCOUNT_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(acc, indent=2), encoding="utf-8")
+        tmp.replace(ACCOUNT_FILE)
+        if not IS_WINDOWS:
+            try:
+                os.chmod(ACCOUNT_FILE, 0o600)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("Failed to save account: %s", e)
+
+
+def _public_account(acc: dict) -> dict:
+    return {
+        "exists":     True,
+        "username":   acc.get("username", ""),
+        "avatar":     acc.get("avatar", ""),
+        "created_at": acc.get("created_at"),
+    }
+
+
+class CreateAccountRequest(BaseModel):
+    username:         str
+    password:         str
+    confirm_password: str
+
+
+class UpdateAccountRequest(BaseModel):
+    username:             Optional[str] = None
+    current_password:     Optional[str] = None
+    new_password:         Optional[str] = None
+    confirm_new_password: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def _validate_username(u: str) -> str:
+    u = (u or "").strip()
+    if len(u) < 2:
+        raise HTTPException(400, "Username must be at least 2 characters")
+    if len(u) > 32:
+        raise HTTPException(400, "Username must be at most 32 characters")
+    return u
+
+
+def _validate_password(p: str) -> None:
+    if not p or len(p) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters")
+    if len(p) > 256:
+        raise HTTPException(400, "Password too long (max 256 characters)")
+
+
+@app.get("/api/account")
+async def get_account():
+    acc = _load_account()
+    if not acc:
+        return {"exists": False}
+    return _public_account(acc)
+
+
+@app.post("/api/account")
+async def create_account(req: CreateAccountRequest):
+    if _load_account():
+        raise HTTPException(400, "An account already exists")
+    username = _validate_username(req.username)
+    _validate_password(req.password)
+    if req.password != req.confirm_password:
+        raise HTTPException(400, "Passwords do not match")
+    h, salt = _hash_password(req.password)
+    acc = {
+        "username":      username,
+        "password_hash": h,
+        "password_salt": salt,
+        "avatar":        "",
+        "created_at":    time.time(),
+    }
+    _save_account(acc)
+    logger.info("Account created for user %r", username)
+    return _public_account(acc)
+
+
+@app.patch("/api/account")
+async def update_account(req: UpdateAccountRequest):
+    acc = _load_account()
+    if not acc:
+        raise HTTPException(404, "No account exists")
+
+    if req.new_password is not None:
+        if not req.current_password or not _verify_password(
+            req.current_password, acc["password_hash"], acc["password_salt"]
+        ):
+            raise HTTPException(401, "Current password is incorrect")
+        _validate_password(req.new_password)
+        if req.new_password != (req.confirm_new_password or ""):
+            raise HTTPException(400, "New passwords do not match")
+        h, salt = _hash_password(req.new_password)
+        acc["password_hash"] = h
+        acc["password_salt"] = salt
+
+    if req.username is not None:
+        acc["username"] = _validate_username(req.username)
+
+    _save_account(acc)
+    return _public_account(acc)
+
+
+@app.delete("/api/account")
+async def delete_account():
+    if ACCOUNT_FILE.exists():
+        try:
+            ACCOUNT_FILE.unlink()
+        except Exception:
+            pass
+    for f in AVATAR_DIR.glob("avatar.*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@app.post("/api/account/avatar")
+async def upload_avatar(file: UploadFile = File(...)):
+    acc = _load_account()
+    if not acc:
+        raise HTTPException(404, "No account exists")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
+    if len(content) > MAX_AVATAR_SIZE:
+        raise HTTPException(
+            413, f"File too large — max {MAX_AVATAR_SIZE // 1024} KiB"
+        )
+
+    ext = ".png"
+    if file.filename:
+        suffix = Path(file.filename).suffix.lower()
+        if suffix in _AVATAR_MIME:
+            ext = suffix
+    content_type = _AVATAR_MIME.get(ext, "image/png")
+
+    # Wipe any previous avatar files before writing the new one
+    for f in AVATAR_DIR.glob("avatar.*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    try:
+        (AVATAR_DIR / f"avatar{ext}").write_bytes(content)
+    except Exception:
+        pass  # data-URL is the source of truth; disk copy is best-effort
+
+    acc["avatar"] = (
+        f"data:{content_type};base64,"
+        + base64.b64encode(content).decode("ascii")
+    )
+    _save_account(acc)
+    return {"ok": True, "avatar": acc["avatar"]}
+
+
+@app.delete("/api/account/avatar")
+async def delete_avatar():
+    acc = _load_account()
+    if not acc:
+        raise HTTPException(404, "No account exists")
+    acc["avatar"] = ""
+    for f in AVATAR_DIR.glob("avatar.*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    _save_account(acc)
+    return {"ok": True}
+
+
+@app.post("/api/account/login")
+async def login(req: LoginRequest):
+    acc = _load_account()
+    if not acc:
+        raise HTTPException(404, "No account exists")
+    if req.username.strip() != acc.get("username") or not _verify_password(
+        req.password, acc["password_hash"], acc["password_salt"]
+    ):
+        # Deliberate short sleep to blunt naive brute force
+        await asyncio.sleep(0.3)
+        raise HTTPException(401, "Invalid credentials")
+    return _public_account(acc)
 
 
 # ── Static files (must be last) ───────────────────────────────────────────────

@@ -87,6 +87,19 @@ Record live streams from **30+ platforms** including:
 - **Persistent State** — All channels, settings, and finished recordings survive container restarts
 - **Raspberry Pi Mode** — Built-in resource-constrained mode for low-power devices (`STREAMREC_PI_MODE=1`)
 
+### 👤 Local Account (optional)
+- **Personalize the dashboard** — Pick a username and a profile picture that shows in the top-right corner across every page
+- **Password-protected** — Stored with PBKDF2-HMAC-SHA256 (200k iterations) over a 32-byte random salt; the plaintext is never written to disk
+- **Skip anytime** — A **Skip for now** button on the welcome screen keeps the full dashboard usable without an account
+- **Account settings menu** — Edit username, change password (with current-password verification), swap or remove your profile picture, or delete the account entirely
+- **Private on-disk** — Account file (`account.json`) is `chmod 600` on Unix and lives inside the recordings volume, not in the exported config
+
+### 🛡️ Reliability
+- **Supervised monitor loop** — Per-channel live checks run in parallel and crash-isolated; one broken URL can't stall detection for the rest
+- **Graceful shutdown** — In-flight recordings are stopped cleanly and state is flushed when the server exits, so no zombie `yt-dlp` children are left behind
+- **Proper concurrency caps** — Concurrent `yt-dlp` subprocesses honour the process semaphore for their entire lifetime (not just creation)
+- **Upload limits** — Cookies files capped at 5 MiB and profile pictures at 2 MiB to prevent accidental disk blowup
+
 ---
 
 ## 📸 Screenshots
@@ -184,7 +197,7 @@ docker compose build --no-cache
 docker compose up -d
 ```
 
-Your channels, settings, and completed recordings are stored in `./recordings/state.json` and will persist across updates.
+Your channels, settings, and completed recordings are stored in `./recordings/state.json` and will persist across updates. If you created a local account, the hashed credentials live in `./recordings/account.json` and your profile picture in `./recordings/avatars/` — back these up alongside the rest of the recordings folder.
 
 ### Manual
 
@@ -392,6 +405,21 @@ streamerREC/
 | `GET` | `/api/disk` | Disk usage stats |
 | `GET` | `/api/export` | Export configuration |
 | `POST` | `/api/import` | Import configuration |
+
+</details>
+
+<details>
+<summary><strong>Account</strong></summary>
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/account` | Get current account (`{exists: false}` if none) |
+| `POST` | `/api/account` | Create account (`username`, `password`, `confirm_password`) |
+| `PATCH` | `/api/account` | Update username or change password |
+| `DELETE` | `/api/account` | Delete the account and its avatar |
+| `POST` | `/api/account/avatar` | Upload a profile picture (multipart, max 2 MiB) |
+| `DELETE` | `/api/account/avatar` | Remove the current profile picture |
+| `POST` | `/api/account/login` | Verify `username` + `password` against the stored hash |
 
 </details>
 

@@ -525,6 +525,91 @@ html.light .plat-tiktok { background: #333; }
   display: inline-flex; align-items: center; gap: 3px;
   font-size: 10px; color: var(--purple); font-family: var(--mono);
 }
+
+/* ── Account corner (top-right, fixed over all pages) ── */
+.account-corner {
+  position: fixed; top: 11px; right: 14px; z-index: 90;
+  display: flex; align-items: center;
+}
+.account-btn {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px;
+  background: var(--s2); border: 1px solid var(--border); border-radius: 999px;
+  cursor: pointer; transition: all 0.15s; color: var(--text);
+  font-family: var(--sans); font-size: 12px; font-weight: 500;
+}
+.account-btn:hover { border-color: var(--border2); background: var(--s3); }
+.account-pfp-img {
+  width: 26px; height: 26px; border-radius: 50%; object-fit: cover; display: block;
+  background: var(--s3);
+}
+.account-pfp-fallback {
+  width: 26px; height: 26px; border-radius: 50%; background: var(--s3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: var(--sub); text-transform: uppercase;
+  flex-shrink: 0;
+}
+.account-pfp-fallback.big {
+  width: 56px; height: 56px; font-size: 22px; border: 2px solid var(--border);
+}
+.account-pfp-fallback.big img {
+  width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block;
+}
+.account-name-txt {
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.account-menu {
+  position: absolute; top: 42px; right: 0; min-width: 180px;
+  background: var(--s1); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px; display: none; flex-direction: column; gap: 2px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.35);
+}
+.account-menu.open { display: flex; }
+.account-menu-item {
+  background: transparent; border: none; padding: 8px 10px; border-radius: 6px;
+  font-family: var(--sans); font-size: 12.5px; color: var(--text); cursor: pointer;
+  text-align: left; transition: background 0.12s;
+}
+.account-menu-item:hover { background: var(--s2); }
+.account-menu-item.danger { color: var(--red); }
+.account-menu-item.danger:hover { background: rgba(239,68,68,0.1); }
+.account-menu-sep {
+  height: 1px; background: var(--border); margin: 4px 4px;
+}
+.account-menu-header {
+  padding: 8px 10px 6px; font-size: 10px; color: var(--muted);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+
+/* Keep topbar content clear of the floating corner */
+.topbar { padding-right: 180px; }
+@media (max-width: 640px) {
+  .topbar { padding-right: 68px; }
+  .account-name-txt { display: none; }
+  .account-btn { padding: 4px; }
+}
+
+/* ── Welcome / Account modals ── */
+.welcome-hero {
+  font-size: 13px; color: var(--sub); margin-bottom: 18px; line-height: 1.5;
+}
+.pw-hint {
+  font-size: 10.5px; color: var(--muted); margin-top: 4px; min-height: 14px;
+}
+.pw-hint.err { color: var(--red); }
+.pw-hint.ok { color: var(--green); }
+.avatar-picker-row {
+  display: flex; align-items: center; gap: 14px;
+}
+.avatar-picker-actions {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.file-label {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 12px; height: 30px; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  color: var(--sub); cursor: pointer; transition: all 0.15s;
+}
+.file-label:hover { border-color: var(--border2); color: var(--text); }
 </style>
 </head>
 <body>
@@ -1023,6 +1108,109 @@ html.light .plat-tiktok { background: #333; }
   <div class="preview-title" id="previewTitle"></div>
 </div>
 
+<!-- Account corner (always visible) -->
+<div class="account-corner" id="accountCorner">
+  <button class="account-btn" id="accountBtn" onclick="toggleAccountMenu(event)" title="Account">
+    <img class="account-pfp-img" id="accountPfpImg" alt="" style="display:none">
+    <div class="account-pfp-fallback" id="accountPfpFallback">G</div>
+    <span class="account-name-txt" id="accountNameTxt">Guest</span>
+  </button>
+  <div class="account-menu" id="accountMenu">
+    <div class="account-menu-header" id="accountMenuHeader">Signed in as Guest</div>
+    <button class="account-menu-item" id="accountMenuCreate" onclick="openWelcome(false)">Create account</button>
+    <button class="account-menu-item" id="accountMenuSettings" onclick="openAccountSettings()" style="display:none">Account settings</button>
+    <button class="account-menu-item" id="accountMenuPfp" onclick="closeAccountMenu(); document.getElementById('accountMenuPfpInput').click()" style="display:none">Change profile picture</button>
+    <input type="file" id="accountMenuPfpInput" accept="image/*" style="display:none" onchange="uploadAccountAvatar(this)">
+    <div class="account-menu-sep" id="accountMenuSep1" style="display:none"></div>
+    <button class="account-menu-item danger" id="accountMenuDelete" onclick="removeAccount()" style="display:none">Delete account</button>
+  </div>
+</div>
+
+<!-- Welcome / Create-Account modal -->
+<div class="overlay" id="welcomeOverlay" onclick="overlayClick(event,'welcomeOverlay')">
+  <div class="modal">
+    <div class="modal-title">Welcome to StreamRec</div>
+    <div class="welcome-hero">Create a local account to personalize your dashboard. Your password is hashed with PBKDF2-SHA256 before being written to disk — the plaintext is never stored.</div>
+    <div class="field">
+      <div class="field-lbl">Username</div>
+      <input class="field-input" id="welUsername" type="text" placeholder="Pick a name" maxlength="32" autocomplete="off">
+    </div>
+    <div class="field">
+      <div class="field-lbl">Password</div>
+      <input class="field-input" id="welPassword" type="password" placeholder="Min. 4 characters" maxlength="256" autocomplete="new-password" oninput="updatePwMatch()">
+    </div>
+    <div class="field">
+      <div class="field-lbl">Confirm password</div>
+      <input class="field-input" id="welPasswordConfirm" type="password" placeholder="Re-enter password" maxlength="256" autocomplete="new-password" oninput="updatePwMatch()" onkeydown="if(event.key==='Enter')createAccount()">
+      <div class="pw-hint" id="welPwHint"></div>
+    </div>
+    <div class="field">
+      <div class="field-lbl">Profile picture (optional)</div>
+      <div class="avatar-picker-row">
+        <div class="account-pfp-fallback big" id="welAvatarPreview">?</div>
+        <div class="avatar-picker-actions">
+          <label class="file-label">
+            Choose image
+            <input type="file" accept="image/*" style="display:none" id="welAvatarInput" onchange="previewAvatarFile(this,'welAvatarPreview')">
+          </label>
+          <button class="file-label" type="button" onclick="clearAvatarPreview('welAvatarPreview','welAvatarInput')">Clear</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="skipAccount()">Skip for now</button>
+      <button class="btn-primary" id="welConfirmBtn" onclick="createAccount()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="13" height="13"><path d="M20 6L9 17l-5-5"/></svg>
+        Create Account
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Account settings modal -->
+<div class="overlay" id="accountSettingsOverlay" onclick="overlayClick(event,'accountSettingsOverlay')">
+  <div class="modal">
+    <div class="modal-title">Account Settings</div>
+
+    <div class="avatar-picker-row" style="margin-bottom:18px">
+      <div class="account-pfp-fallback big" id="accSettingsAvatar">?</div>
+      <div class="avatar-picker-actions">
+        <label class="file-label">
+          Upload picture
+          <input type="file" accept="image/*" style="display:none" onchange="uploadAccountAvatar(this)">
+        </label>
+        <button class="file-label" type="button" onclick="removeAccountAvatar()">Remove picture</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="field-lbl">Username</div>
+      <input class="field-input" id="accSettingsUsername" type="text" maxlength="32" autocomplete="off">
+    </div>
+
+    <div class="modal-section">Change password</div>
+    <div class="field">
+      <div class="field-lbl">Current password</div>
+      <input class="field-input" id="accSettingsCurrentPw" type="password" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <div class="field-lbl">New password</div>
+      <input class="field-input" id="accSettingsNewPw" type="password" maxlength="256" autocomplete="new-password" oninput="updateSettingsPwMatch()">
+    </div>
+    <div class="field">
+      <div class="field-lbl">Confirm new password</div>
+      <input class="field-input" id="accSettingsNewPwConfirm" type="password" maxlength="256" autocomplete="new-password" oninput="updateSettingsPwMatch()">
+      <div class="pw-hint" id="accSettingsPwHint">Leave blank to keep current password.</div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn-danger" onclick="removeAccount()">Delete Account</button>
+      <button class="btn-cancel" onclick="closeAccountSettings()">Cancel</button>
+      <button class="btn-primary" onclick="saveAccountSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1130,6 +1318,13 @@ function closeAddModal() {
   document.getElementById('addChPassword').value = '';
   document.getElementById('addExtraArgs').value = '';
   document.getElementById('addCookiesFile').value = '';
+  document.getElementById('addQuality').value = '';
+  document.getElementById('addFormat').value  = '';
+  // Reset toggles to their natural defaults
+  setToggle('addMonitoring',  true);
+  setToggle('addRecordNow',   false);
+  setToggle('addAutoConvert', false);
+  setToggle('addDeleteOrig',  false);
 }
 function overlayClick(e, id) {
   if (e.target === document.getElementById(id)) {
@@ -1335,7 +1530,11 @@ function debounce(fn, ms) {
 }
 
 // ── Render ─────────────────────────────────────────────────────────────────────
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 function fmtBytes(b) {
   if (!b) return '—';
@@ -1541,8 +1740,11 @@ function filterCards() {
     const id = card.id.replace('card-', '');
     const ch = channels[id];
     if (!ch) return;
-    const match = (ch.url + ch.platform + ch.display_name + ch.username).toLowerCase().includes(q);
-    card.style.display = match ? '' : 'none';
+    const hay = (
+      (ch.url || '') + ' ' + (ch.platform || '') + ' ' +
+      (ch.display_name || '') + ' ' + (ch.username || '')
+    ).toLowerCase();
+    card.style.display = hay.includes(q) ? '' : 'none';
   });
 }
 const debouncedFilterCards = debounce(filterCards, 150);
@@ -2009,8 +2211,311 @@ async function initPolling() {
   startPolling();
 }
 
+// ── Account ───────────────────────────────────────────────────────────────────
+let accountState = { exists: false, username: '', avatar: '' };
+let pendingAvatarDataUrl = ''; // captured during welcome flow (new-signup avatar)
+
+function initialsOf(name) {
+  if (!name) return 'G';
+  return String(name).trim().charAt(0).toUpperCase() || 'G';
+}
+
+function renderAccountCorner() {
+  const btn      = document.getElementById('accountBtn');
+  const nameTxt  = document.getElementById('accountNameTxt');
+  const img      = document.getElementById('accountPfpImg');
+  const fallback = document.getElementById('accountPfpFallback');
+  const header   = document.getElementById('accountMenuHeader');
+  const mCreate  = document.getElementById('accountMenuCreate');
+  const mSettings= document.getElementById('accountMenuSettings');
+  const mPfp     = document.getElementById('accountMenuPfp');
+  const mDelete  = document.getElementById('accountMenuDelete');
+  const mSep1    = document.getElementById('accountMenuSep1');
+
+  if (accountState.exists) {
+    const name = accountState.username || 'Account';
+    nameTxt.textContent = name;
+    btn.title = name;
+    header.textContent = 'Signed in as ' + name;
+    if (accountState.avatar) {
+      img.src = accountState.avatar;
+      img.style.display = '';
+      fallback.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      fallback.style.display = '';
+      fallback.textContent = initialsOf(name);
+    }
+    mCreate.style.display   = 'none';
+    mSettings.style.display = '';
+    mPfp.style.display      = '';
+    mDelete.style.display   = '';
+    mSep1.style.display     = '';
+  } else {
+    nameTxt.textContent = 'Guest';
+    btn.title = 'Guest (no account)';
+    header.textContent = 'Browsing as Guest';
+    img.style.display = 'none';
+    fallback.style.display = '';
+    fallback.textContent = 'G';
+    mCreate.style.display   = '';
+    mSettings.style.display = 'none';
+    mPfp.style.display      = 'none';
+    mDelete.style.display   = 'none';
+    mSep1.style.display     = 'none';
+  }
+}
+
+function toggleAccountMenu(e) {
+  if (e) e.stopPropagation();
+  document.getElementById('accountMenu').classList.toggle('open');
+}
+function closeAccountMenu() {
+  document.getElementById('accountMenu').classList.remove('open');
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#accountCorner')) closeAccountMenu();
+});
+
+async function fetchAccount() {
+  try {
+    const res = await fetch(`${API}/api/account`);
+    const data = await res.json();
+    accountState = {
+      exists:   !!data.exists,
+      username: data.username || '',
+      avatar:   data.avatar   || '',
+    };
+    renderAccountCorner();
+    // Show welcome modal on first visit if no account and user hasn't skipped
+    if (!accountState.exists && localStorage.getItem('streamrecAccountSkipped') !== '1') {
+      openWelcome(true);
+    }
+  } catch { /* offline / not ready yet */ }
+}
+
+function openWelcome(firstRun) {
+  closeAccountMenu();
+  document.getElementById('welUsername').value = '';
+  document.getElementById('welPassword').value = '';
+  document.getElementById('welPasswordConfirm').value = '';
+  document.getElementById('welAvatarInput').value = '';
+  clearAvatarPreview('welAvatarPreview','welAvatarInput');
+  document.getElementById('welPwHint').textContent = '';
+  document.getElementById('welPwHint').className = 'pw-hint';
+  document.getElementById('welcomeOverlay').classList.add('open');
+  setTimeout(() => document.getElementById('welUsername').focus(), 80);
+}
+function closeWelcome() {
+  document.getElementById('welcomeOverlay').classList.remove('open');
+}
+
+function updatePwMatch() {
+  const pw  = document.getElementById('welPassword').value;
+  const pw2 = document.getElementById('welPasswordConfirm').value;
+  const hint = document.getElementById('welPwHint');
+  if (!pw && !pw2) { hint.textContent = ''; hint.className = 'pw-hint'; return; }
+  if (pw.length < 4) { hint.textContent = 'Password must be at least 4 characters.'; hint.className = 'pw-hint err'; return; }
+  if (!pw2) { hint.textContent = 'Re-enter the password to confirm.'; hint.className = 'pw-hint'; return; }
+  if (pw !== pw2) { hint.textContent = 'Passwords do not match.'; hint.className = 'pw-hint err'; return; }
+  hint.textContent = 'Passwords match.'; hint.className = 'pw-hint ok';
+}
+
+function updateSettingsPwMatch() {
+  const pw  = document.getElementById('accSettingsNewPw').value;
+  const pw2 = document.getElementById('accSettingsNewPwConfirm').value;
+  const hint = document.getElementById('accSettingsPwHint');
+  if (!pw && !pw2) {
+    hint.textContent = 'Leave blank to keep current password.';
+    hint.className = 'pw-hint';
+    return;
+  }
+  if (pw.length < 4) { hint.textContent = 'New password must be at least 4 characters.'; hint.className = 'pw-hint err'; return; }
+  if (pw !== pw2) { hint.textContent = 'Passwords do not match.'; hint.className = 'pw-hint err'; return; }
+  hint.textContent = 'Passwords match.'; hint.className = 'pw-hint ok';
+}
+
+function previewAvatarFile(input, previewId) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    toast('Image too large — max 2 MiB', true);
+    input.value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingAvatarDataUrl = reader.result;
+    const el = document.getElementById(previewId);
+    el.innerHTML = `<img src="${reader.result}" alt="">`;
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearAvatarPreview(previewId, inputId) {
+  pendingAvatarDataUrl = '';
+  if (inputId) {
+    const inp = document.getElementById(inputId);
+    if (inp) inp.value = '';
+  }
+  const el = document.getElementById(previewId);
+  el.innerHTML = '?';
+}
+
+async function createAccount() {
+  const username = document.getElementById('welUsername').value.trim();
+  const password = document.getElementById('welPassword').value;
+  const confirm  = document.getElementById('welPasswordConfirm').value;
+  if (!username || username.length < 2) { toast('Username must be at least 2 characters', true); return; }
+  if (password.length < 4)              { toast('Password must be at least 4 characters', true); return; }
+  if (password !== confirm)             { toast('Passwords do not match', true); return; }
+
+  const btn = document.getElementById('welConfirmBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/api/account`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ username, password, confirm_password: confirm })
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Failed');
+
+    // Upload avatar if the user picked one
+    const input = document.getElementById('welAvatarInput');
+    if (input.files && input.files[0]) {
+      const fd = new FormData();
+      fd.append('file', input.files[0]);
+      try { await fetch(`${API}/api/account/avatar`, { method: 'POST', body: fd }); } catch {}
+    }
+    localStorage.removeItem('streamrecAccountSkipped');
+    toast('Account created');
+    closeWelcome();
+    await fetchAccount();
+  } catch (e) {
+    toast('Error: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function skipAccount() {
+  localStorage.setItem('streamrecAccountSkipped', '1');
+  closeWelcome();
+  toast('Continuing as Guest');
+}
+
+// ── Account settings ──────────────────────────────────────────────────────────
+function openAccountSettings() {
+  closeAccountMenu();
+  if (!accountState.exists) { openWelcome(false); return; }
+  document.getElementById('accSettingsUsername').value = accountState.username || '';
+  document.getElementById('accSettingsCurrentPw').value = '';
+  document.getElementById('accSettingsNewPw').value = '';
+  document.getElementById('accSettingsNewPwConfirm').value = '';
+  const avatarEl = document.getElementById('accSettingsAvatar');
+  if (accountState.avatar) {
+    avatarEl.innerHTML = `<img src="${accountState.avatar}" alt="">`;
+  } else {
+    avatarEl.innerHTML = initialsOf(accountState.username);
+  }
+  const hint = document.getElementById('accSettingsPwHint');
+  hint.textContent = 'Leave blank to keep current password.';
+  hint.className = 'pw-hint';
+  document.getElementById('accountSettingsOverlay').classList.add('open');
+}
+
+function closeAccountSettings() {
+  document.getElementById('accountSettingsOverlay').classList.remove('open');
+}
+
+async function saveAccountSettings() {
+  const username = document.getElementById('accSettingsUsername').value.trim();
+  const curPw    = document.getElementById('accSettingsCurrentPw').value;
+  const newPw    = document.getElementById('accSettingsNewPw').value;
+  const newPw2   = document.getElementById('accSettingsNewPwConfirm').value;
+
+  const body = {};
+  if (username && username !== accountState.username) body.username = username;
+  if (newPw) {
+    if (!curPw)             { toast('Enter current password to change it', true); return; }
+    if (newPw.length < 4)   { toast('New password must be at least 4 characters', true); return; }
+    if (newPw !== newPw2)   { toast('New passwords do not match', true); return; }
+    body.current_password     = curPw;
+    body.new_password         = newPw;
+    body.confirm_new_password = newPw2;
+  }
+  if (!Object.keys(body).length) {
+    closeAccountSettings();
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/api/account`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Failed');
+    toast('Account updated');
+    closeAccountSettings();
+    await fetchAccount();
+  } catch (e) {
+    toast('Error: ' + e.message, true);
+  }
+}
+
+async function uploadAccountAvatar(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    toast('Image too large — max 2 MiB', true);
+    input.value = '';
+    return;
+  }
+  if (!accountState.exists) {
+    toast('Create an account first', true);
+    input.value = '';
+    return;
+  }
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`${API}/api/account/avatar`, { method: 'POST', body: fd });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Upload failed');
+    toast('Profile picture updated');
+    await fetchAccount();
+    // Also refresh the settings modal preview if open
+    const avatarEl = document.getElementById('accSettingsAvatar');
+    if (avatarEl && accountState.avatar) avatarEl.innerHTML = `<img src="${accountState.avatar}" alt="">`;
+  } catch (e) {
+    toast('Error: ' + e.message, true);
+  }
+  input.value = '';
+}
+
+async function removeAccountAvatar() {
+  if (!accountState.exists) return;
+  try {
+    await fetch(`${API}/api/account/avatar`, { method: 'DELETE' });
+    toast('Profile picture removed');
+    await fetchAccount();
+    const avatarEl = document.getElementById('accSettingsAvatar');
+    if (avatarEl) avatarEl.innerHTML = initialsOf(accountState.username);
+  } catch (e) { toast('Error: ' + e.message, true); }
+}
+
+async function removeAccount() {
+  closeAccountMenu();
+  if (!confirm('Delete your account? This removes your saved username, password hash, and profile picture from this device.')) return;
+  try {
+    await fetch(`${API}/api/account`, { method: 'DELETE' });
+    localStorage.setItem('streamrecAccountSkipped', '1');
+    toast('Account deleted');
+    closeAccountSettings();
+    await fetchAccount();
+  } catch (e) { toast('Error: ' + e.message, true); }
+}
+
 fetchChannels();
 loadSettings();
+fetchAccount();
 initPolling();
 
 // Tick recording durations every second without a full fetch
