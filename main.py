@@ -53,12 +53,15 @@ COOKIES_DIR.mkdir(exist_ok=True)
 ACCOUNT_FILE = RECORDINGS_DIR / "account.json"
 AVATAR_DIR   = RECORDINGS_DIR / "avatars"
 AVATAR_DIR.mkdir(exist_ok=True)
+ARCHIVE_DIR  = RECORDINGS_DIR / "_archived"
+ARCHIVE_DIR.mkdir(exist_ok=True)
 
 # Static files: Docker puts index.html in /app, bare metal uses same dir as main.py
 _static_dir = os.environ.get("STATIC_DIR", str(Path(__file__).parent))
 
 # ── Version ───────────────────────────────────────────────────────────────────
 VERSION = "1.0.0"
+START_TIME = time.time()
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -75,8 +78,15 @@ async def lifespan(app: FastAPI):
         pass
     # Drain any active recordings so we don't leave zombie yt-dlp children behind
     for rec in list(recordings.values()):
-        if rec.get("status") in ("recording", "starting") and rec.get("pid"):
-            _stop_rec(rec, force=False)
+        if rec.get("status") in ("recording", "starting"):
+            if rec.get("pid"):
+                _stop_rec(rec, force=False)
+            else:
+                # Recording was starting but subprocess hadn't spawned yet
+                rec["status"] = "completed"
+                rec["ended_at"] = time.time()
+                if (ch_id := rec.get("channel_id")) and ch_id in channels:
+                    channels[ch_id]["recording_id"] = None
     _save_state_sync()
     logger.info("StreamRec shutting down")
 
@@ -98,6 +108,22 @@ _proc_semaphore = asyncio.Semaphore(3 if PI_MODE else 6)
 
 channels:   dict[str, dict] = {}
 recordings: dict[str, dict] = {}
+_recording_locks: dict[str, asyncio.Lock] = {}
+_lock_cleanup_counter = 0
+
+
+def _get_recording_lock(ch_id: str) -> asyncio.Lock:
+    """Return a per-channel lock to prevent double-recording races."""
+    global _lock_cleanup_counter
+    if ch_id not in _recording_locks:
+        _recording_locks[ch_id] = asyncio.Lock()
+    # Periodically remove locks for deleted channels
+    _lock_cleanup_counter += 1
+    if _lock_cleanup_counter % 50 == 0:
+        for cid in list(_recording_locks):
+            if cid not in channels:
+                del _recording_locks[cid]
+    return _recording_locks[ch_id]
 
 _disk_cache:    dict  = {}
 _disk_cache_ts: float = 0
@@ -170,6 +196,10 @@ settings: dict = {
     "proxy":            "",
     "cookies_file":     "",
     "extra_args":       "",
+    "retention_days":   0,   # 0 = keep forever
+    "max_duration":     0,   # 0 = no limit, in minutes
+    "webhook_url":      "",
+    "auto_stop_stalled": False,
 }
 
 # ── Cross-platform process helpers ────────────────────────────────────────────
@@ -222,7 +252,7 @@ def _save_state_sync():
     # Persist finished recordings (completed/error) so they survive restarts
     saved_recordings = {}
     for rid, rec in recordings.items():
-        if rec.get("status") in ("completed", "error"):
+        if rec.get("status") in ("completed", "error", "archived"):
             saved_recordings[rid] = rec
     try:
         tmp = STATE_FILE.with_suffix(".tmp")
@@ -387,6 +417,7 @@ async def fetch_metadata(url: str) -> dict:
             "avatar":       avatar,
             "thumbnail":    thumbnail,
             "is_live":      bool(data.get("is_live")),
+            "stream_title": (data.get("title") or "").strip(),
         }
     except Exception:
         # Total failure — still return URL-derived name so card isn't blank
@@ -397,6 +428,7 @@ async def fetch_metadata(url: str) -> dict:
                 "avatar":       "",
                 "thumbnail":    "",
                 "is_live":      False,
+                "stream_title": "",
             }
         return {}
 
@@ -444,12 +476,13 @@ async def _check_chaturbate_live(url: str, proxy: str = "") -> Optional[bool]:
         if proxy:
             curl_cmd += ["--proxy", proxy]
         curl_cmd.append(url)
-        proc = await asyncio.create_subprocess_exec(
-            *curl_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        async with _proc_semaphore:
+            proc = await asyncio.create_subprocess_exec(
+                *curl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
         if not stdout:
             return None
         html = stdout.decode("utf-8", errors="replace")
@@ -507,27 +540,30 @@ async def check_is_live(url: str, proxy: str = "") -> bool:
 # ── Recording ─────────────────────────────────────────────────────────────────
 
 async def _start_recording_for_channel(ch_id: str) -> Optional[str]:
-    ch = channels.get(ch_id)
-    if not ch:
-        return None
-    existing = ch.get("recording_id")
-    if existing and existing in recordings and recordings[existing]["status"] in ("recording", "starting"):
-        return None
-    rec_id = str(uuid.uuid4())[:8]
-    recordings[rec_id] = {
-        "id": rec_id, "channel_id": ch_id,
-        "url": ch["url"], "platform": ch["platform"],
-        "quality": ch.get("quality") or settings["default_quality"],
-        "format":  ch.get("format")  or settings["default_format"],
-        "status": "starting", "created_at": time.time(),
-        "started_at": None, "ended_at": None,
-        "bytes": 0, "speed": None,
-        "filepath": None, "filename": None,
-        "log": [], "stopping": False, "auto": False,
-    }
-    channels[ch_id]["recording_id"] = rec_id
-    asyncio.create_task(run_recording(rec_id))
-    return rec_id
+    # Per-channel lock prevents double-recording from concurrent calls
+    lock = _get_recording_lock(ch_id)
+    async with lock:
+        ch = channels.get(ch_id)
+        if not ch:
+            return None
+        existing = ch.get("recording_id")
+        if existing and existing in recordings and recordings[existing]["status"] in ("recording", "starting"):
+            return None
+        rec_id = str(uuid.uuid4())[:8]
+        recordings[rec_id] = {
+            "id": rec_id, "channel_id": ch_id,
+            "url": ch["url"], "platform": ch["platform"],
+            "quality": ch.get("quality") or settings["default_quality"],
+            "format":  ch.get("format")  or settings["default_format"],
+            "status": "starting", "created_at": time.time(),
+            "started_at": None, "ended_at": None,
+            "bytes": 0, "speed": None,
+            "filepath": None, "filename": None,
+            "log": [], "stopping": False, "auto": False,
+        }
+        channels[ch_id]["recording_id"] = rec_id
+        asyncio.create_task(run_recording(rec_id))
+        return rec_id
 
 
 async def run_recording(rec_id: str):
@@ -636,6 +672,7 @@ async def run_recording(rec_id: str):
     rec["log"]        = []
     size_task         = None
     proc              = None
+    duration_task     = None
     file_captured     = False  # pre-init so `finally` can read it even if we fail early
     logger.info("Recording started: %s for %s (%s)", rec_id, username, url)
 
@@ -663,6 +700,7 @@ async def run_recording(rec_id: str):
         async def _poll_size():
             last_bytes = 0
             last_time = time.time()
+            last_change = time.time()
             while True:
                 await asyncio.sleep(get_size_poll_interval())
                 for f in rec_dir.glob(f"{stem}.*"):
@@ -680,14 +718,40 @@ async def run_recording(rec_id: str):
                                     rec["speed"] = f"{bps/1024:.1f}KiB/s"
                                 else:
                                     rec["speed"] = f"{bps:.0f}B/s"
+                            if sz != last_bytes:
+                                last_change = now
                             last_bytes = sz
                             last_time = now
                             rec["bytes"] = sz
                     except Exception:
                         pass
                     break
+                # Stalled detection: no data written for 120s (240s in Pi mode)
+                stall_timeout = 240 if _is_pi() else 120
+                if time.time() - last_change > stall_timeout:
+                    rec["log"].append(
+                        f"[StreamRec] WARNING — no data received for {stall_timeout}s. "
+                        "Stream may have ended silently."
+                    )
+                    if settings.get("auto_stop_stalled", False) and not rec.get("stopping"):
+                        rec["log"].append(
+                            "[StreamRec] Auto-stop-stalled enabled — stopping recording."
+                        )
+                        _stop_rec(rec, force=False)
 
         size_task = asyncio.create_task(_poll_size())
+
+        # Max duration enforcement
+        max_dur_mins = int(ch.get("max_duration") or settings.get("max_duration", 0))
+        if max_dur_mins > 0:
+            async def _enforce_duration():
+                await asyncio.sleep(max_dur_mins * 60)
+                if rec.get("status") == "recording" and not rec.get("stopping"):
+                    rec["log"].append(
+                        f"[StreamRec] Max recording duration ({max_dur_mins} min) reached — stopping gracefully"
+                    )
+                    _stop_rec(rec, force=False)
+            duration_task = asyncio.create_task(_enforce_duration())
 
         rec_dir_str = str(RECORDINGS_DIR)
         async for raw_line in proc.stdout:
@@ -761,6 +825,8 @@ async def run_recording(rec_id: str):
     finally:
         if size_task:
             size_task.cancel()
+        if duration_task:
+            duration_task.cancel()
         # Make sure we never leave an orphaned yt-dlp subprocess running
         if proc is not None and proc.returncode is None:
             try:
@@ -859,6 +925,18 @@ async def run_recording(rec_id: str):
 
         _save_state()
 
+        # Webhook notification on recording completion
+        if rec.get("status") in ("completed", "error"):
+            asyncio.create_task(_send_webhook("recording_complete", {
+                "recording_id": rec.get("id"),
+                "channel_id": rec.get("channel_id"),
+                "status": rec.get("status"),
+                "filename": rec.get("filename", ""),
+                "bytes": rec.get("bytes", 0),
+                "error": rec.get("error", ""),
+                "platform": rec.get("platform", ""),
+            }))
+
         # Auto-retry on unexpected disconnect
         retry_ch_id = rec.get("channel_id")
         # Don't retry if stream ran for more than 30s — that's a natural end, not a crash
@@ -891,6 +969,44 @@ async def run_recording(rec_id: str):
 
 
 # ── Monitor loop ──────────────────────────────────────────────────────────────
+
+async def _send_webhook(event: str, payload: dict):
+    """Send a JSON POST to the configured webhook URL."""
+    url = settings.get("webhook_url", "").strip()
+    if not url:
+        return
+    try:
+        async with _proc_semaphore:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-X", "POST", "-H", "Content-Type: application/json",
+                "-d", json.dumps({"event": event, **payload}, default=str),
+                "--max-time", "10", url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=12)
+    except Exception:
+        pass
+
+
+async def _run_retention_cleanup():
+    """Delete recordings older than retention_days."""
+    days = int(settings.get("retention_days", 0))
+    if days <= 0:
+        return
+    cutoff = time.time() - (days * 86400)
+    for rec_id, rec in list(recordings.items()):
+        if rec.get("status") not in ("completed", "error"):
+            continue
+        if rec.get("created_at", time.time()) > cutoff:
+            continue
+        if fp := rec.get("filepath"):
+            try:
+                Path(fp).unlink(missing_ok=True)
+            except Exception:
+                pass
+        recordings.pop(rec_id, None)
+    _save_state()
 
 async def _check_one_channel(ch_id: str) -> None:
     """Check a single channel's live state and auto-record if needed.
@@ -931,9 +1047,17 @@ async def _check_one_channel(ch_id: str) -> None:
             return
         if rec_id and rec_id in recordings:
             recordings[rec_id]["auto"] = True
+            asyncio.create_task(_send_webhook("stream_live", {
+                "channel_id": ch_id,
+                "name": channels[ch_id].get("display_name", ""),
+                "url": channels[ch_id].get("url", ""),
+                "platform": channels[ch_id].get("platform", ""),
+                "recording_id": rec_id,
+            }))
 
 
 async def monitor_loop():
+    _last_retention_check = 0
     while True:
         interval = max(5, int(settings.get("monitor_interval", 60)))
         await asyncio.sleep(interval)
@@ -947,6 +1071,11 @@ async def monitor_loop():
             *(_check_one_channel(cid) for cid in ids),
             return_exceptions=True,
         )
+        # Retention cleanup runs once per hour
+        now = time.time()
+        if now - _last_retention_check > 3600:
+            _last_retention_check = now
+            await _run_retention_cleanup()
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -964,6 +1093,8 @@ class AddChannelRequest(BaseModel):
     username:         str  = ""
     password:         str  = ""
     extra_args:       str  = ""
+    max_duration:     int  = 0
+    notes:            str  = ""
 
 class UpdateChannelRequest(BaseModel):
     monitoring:       Optional[bool] = None
@@ -976,6 +1107,8 @@ class UpdateChannelRequest(BaseModel):
     username:         Optional[str]  = None
     password:         Optional[str]  = None
     extra_args:       Optional[str]  = None
+    max_duration:     Optional[int]  = None
+    notes:            Optional[str]  = None
 
 class UpdateSettingsRequest(BaseModel):
     pi_mode:          Optional[bool] = None
@@ -991,6 +1124,10 @@ class UpdateSettingsRequest(BaseModel):
     proxy:            Optional[str]  = None
     cookies_file:     Optional[str]  = None
     extra_args:       Optional[str]  = None
+    retention_days:   Optional[int]  = None
+    max_duration:     Optional[int]  = None
+    webhook_url:      Optional[str]  = None
+    auto_stop_stalled: Optional[bool] = None
 
 class ReorderRequest(BaseModel):
     order: list[str]
@@ -998,6 +1135,11 @@ class ReorderRequest(BaseModel):
 class BulkActionRequest(BaseModel):
     ids:    list[str]
     action: str  # "record" | "stop" | "delete"
+
+class BulkEditRequest(BaseModel):
+    ids:     list[str]
+    quality: Optional[str]  = None
+    format:  Optional[str]  = None
 
 class ImportRequest(BaseModel):
     channels: dict = {}
@@ -1034,8 +1176,11 @@ async def add_channel(req: AddChannelRequest):
         "ch_username":      req.username,
         "ch_password":      req.password,
         "extra_args":       req.extra_args,
+        "max_duration":     req.max_duration,
+        "notes":            req.notes,
         "created_at":  time.time(),
         "display_name": "", "username": "", "avatar": "", "thumbnail": "",
+        "stream_title": "",
         "is_live": False, "last_checked": None, "recording_id": None,
     }
     channels[ch_id] = ch
@@ -1048,6 +1193,7 @@ async def add_channel(req: AddChannelRequest):
                 "username":     meta.get("username", ""),
                 "avatar":       meta.get("avatar", ""),
                 "thumbnail":    meta.get("thumbnail", ""),
+                "stream_title": meta.get("stream_title", ""),
                 "is_live":      meta.get("is_live", False),
                 "last_checked": time.time(),
             })
@@ -1154,6 +1300,7 @@ async def refresh_channel(ch_id: str):
             "username":     meta.get("username")     or ch.get("username") or "",
             "avatar":       meta.get("avatar")       or ch.get("avatar", ""),
             "thumbnail":    meta.get("thumbnail")    or ch.get("thumbnail", ""),
+            "stream_title": meta.get("stream_title") or ch.get("stream_title", ""),
             "is_live":      meta.get("is_live", False),
             "last_checked": time.time(),
         })
@@ -1211,6 +1358,21 @@ async def bulk_action(req: BulkActionRequest):
     return {"results": results}
 
 
+@app.post("/api/channels/bulk-edit")
+async def bulk_edit(req: BulkEditRequest):
+    updated = 0
+    for ch_id in req.ids:
+        if ch_id not in channels:
+            continue
+        if req.quality is not None:
+            channels[ch_id]["quality"] = req.quality
+        if req.format is not None:
+            channels[ch_id]["format"] = req.format
+        updated += 1
+    _save_state()
+    return {"ok": True, "updated": updated}
+
+
 # ── Recording endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/recordings")
@@ -1219,6 +1381,13 @@ async def list_recordings():
     for rec in recordings.values():
         r = dict(rec)
         r.pop("log", None)
+        r.pop("pid", None)
+        # Include channel info for richer frontend display
+        if ch_id := rec.get("channel_id"):
+            ch = channels.get(ch_id, {})
+            r["channel_thumbnail"]  = ch.get("thumbnail", "")
+            r["channel_display_name"] = ch.get("display_name", "")
+            r["channel_avatar"]     = ch.get("avatar", "")
         result.append(r)
     return sorted(result, key=lambda x: x["created_at"], reverse=True)
 
@@ -1244,14 +1413,72 @@ async def download_recording(rec_id: str):
 
 @app.delete("/api/recordings/{rec_id}")
 async def delete_recording(rec_id: str):
-    rec = recordings.pop(rec_id, None)
+    rec = recordings.get(rec_id)
     if not rec:
         raise HTTPException(404, "Not found")
+    # Stop active recording process before deleting
+    if rec.get("status") in ("recording", "starting"):
+        _stop_rec(rec, force=True)
+        rec["status"] = "completed"
+        rec["ended_at"] = time.time()
+        if (ch_id := rec.get("channel_id")) and ch_id in channels:
+            channels[ch_id]["recording_id"] = None
+    recordings.pop(rec_id, None)
     if fp := rec.get("filepath"):
         try:
-            Path(fp).unlink()
+            Path(fp).unlink(missing_ok=True)
         except Exception:
             pass
+    return {"ok": True}
+
+
+@app.post("/api/recordings/{rec_id}/archive")
+async def archive_recording(rec_id: str):
+    rec = recordings.get(rec_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") not in ("completed", "error"):
+        raise HTTPException(400, "Only completed recordings can be archived")
+    fp = rec.get("filepath")
+    if fp and Path(fp).exists():
+        try:
+            dest = ARCHIVE_DIR / Path(fp).name
+            shutil.move(fp, str(dest))
+            rec["filepath"] = str(dest)
+            rec["filename"] = dest.name
+        except Exception as e:
+            raise HTTPException(500, f"Failed to archive: {e}")
+    rec["status"] = "archived"
+    _save_state()
+    return {"ok": True}
+
+
+@app.post("/api/recordings/{rec_id}/restore")
+async def restore_recording(rec_id: str):
+    rec = recordings.get(rec_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") != "archived":
+        raise HTTPException(400, "Only archived recordings can be restored")
+    fp = rec.get("filepath")
+    if fp and Path(fp).exists():
+        try:
+            ch_id = rec.get("channel_id")
+            ch = channels.get(ch_id, {}) if ch_id else {}
+            plat = (ch.get("platform") or rec.get("platform") or "Unknown").lower()
+            safe_plat = re.sub(r'[^\w\-]', '_', plat)
+            user = ch.get("display_name") or ch.get("username") or "unknown"
+            safe_user = re.sub(r'[^\w\-]', '_', user)
+            rec_dir = RECORDINGS_DIR / safe_plat / safe_user
+            rec_dir.mkdir(parents=True, exist_ok=True)
+            dest = rec_dir / Path(fp).name
+            shutil.move(fp, str(dest))
+            rec["filepath"] = str(dest)
+            rec["filename"] = dest.name
+        except Exception as e:
+            raise HTTPException(500, f"Failed to restore: {e}")
+    rec["status"] = "completed"
+    _save_state()
     return {"ok": True}
 
 
@@ -1404,7 +1631,14 @@ async def list_platforms():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "channels": len(channels), "recordings": len(recordings)}
+    active_recs = sum(1 for r in recordings.values() if r.get("status") in ("recording", "starting"))
+    return {
+        "ok": True,
+        "channels": len(channels),
+        "recordings": len(recordings),
+        "active": active_recs,
+        "uptime": int(time.time() - START_TIME),
+    }
 
 
 @app.get("/api/version")

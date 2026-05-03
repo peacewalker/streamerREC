@@ -62,22 +62,33 @@ Record live streams from **30+ platforms** including:
 - **Quality Selection** — Choose from Best, 1080p, 720p, 480p, or Lowest quality per channel
 - **Multiple Formats** — Record in MP4, MKV, or TS container formats
 - **Live-from-Start** — Captures the stream from the very beginning (on supported platforms)
-- **Bulk Actions** — Select multiple channels and record, stop, or delete them all at once
+- **Bulk Actions** — Multi-select channels and record, stop, delete, or edit quality/format in bulk
 - **Channel Reordering** — Drag-and-drop to organize your channel list
+- **Per-Channel Notes** — Add private notes to each channel for context
+- **Stream Title Tracking** — See what the streamer is currently broadcasting
 
 ### 📡 Smart Recording
 - **Auto-Retry on Disconnect** — Automatically reconnects when a stream drops, with configurable retry count and delay
 - **Post-Processing** — Optionally auto-convert recordings to MP4 after completion (lossless remux)
 - **Container Fix** — Automatically remuxes interrupted recordings to fix broken containers
-- **Progress Tracking** — Real-time file size and download speed displayed per recording
+- **Progress Tracking** — Real-time file size, download speed, and duration displayed per recording
+- **Max Duration Enforcement** — Set a per-channel or global time limit; recordings auto-stop gracefully when reached
+- **Recording Retention** — Auto-delete recordings older than N days to manage disk space (0 = keep forever)
+- **Stalled Detection** — Warns (or auto-stops) when a stream stops sending data silently
+- **Webhook Notifications** — POST JSON to any HTTP endpoint when streams go live or recordings complete
+- **Archive & Restore** — Move completed recordings to an archive folder and restore them later
 
 ### 🖥️ Beautiful Web Interface
 - **Dark & Light Themes** — Toggle between dark and light mode with one click
 - **Responsive Design** — Works on desktop, tablet, and mobile
-- **Search & Filter** — Quickly find channels with the built-in search bar
-- **In-Browser Preview** — Play back completed recordings directly in the browser with streaming video support
-- **Live Log Panel** — View real-time recording logs at the bottom of the screen
+- **Search & Filter** — Quickly find channels by name, platform, notes, or stream title
+- **Sort Channels** — Order by name, platform, recently added, last checked, or live first
+- **Recordings Filter & Sort** — Filter by status and sort by date, size, or name
+- **In-Browser Preview** — Play back completed recordings directly in the browser
+- **Live Log Panel** — View real-time yt-dlp output from the channels or recordings page
 - **Disk Usage Stats** — Monitor your storage usage from the recordings page
+- **Concurrent Slot Indicator** — See how many recording slots are in use (e.g. 2/6)
+- **Keyboard Shortcuts** — Press `N` to add, `1-4` to navigate pages, `R/S/Del` for bulk actions
 
 ### ⚙️ Configuration
 - **Per-Channel Overrides** — Set quality, format, proxy, and post-processing options individually per channel
@@ -96,9 +107,13 @@ Record live streams from **30+ platforms** including:
 
 ### 🛡️ Reliability
 - **Supervised monitor loop** — Per-channel live checks run in parallel and crash-isolated; one broken URL can't stall detection for the rest
-- **Graceful shutdown** — In-flight recordings are stopped cleanly and state is flushed when the server exits, so no zombie `yt-dlp` children are left behind
-- **Proper concurrency caps** — Concurrent `yt-dlp` subprocesses honour the process semaphore for their entire lifetime (not just creation)
-- **Upload limits** — Cookies files capped at 5 MiB and profile pictures at 2 MiB to prevent accidental disk blowup
+- **Graceful shutdown** — In-flight recordings are stopped cleanly and state is flushed when the server exits
+- **Proper concurrency caps** — Concurrent `yt-dlp` and `curl` subprocesses honour the process semaphore
+- **Per-channel recording lock** — Prevents accidental double-recording from concurrent calls
+- **Stalled recording detection** — Warns (or auto-stops) when a stream stops sending data silently
+- **Upload limits** — Cookies files capped at 5 MiB, profile pictures at 2 MiB
+- **PBKDF2 password hashing** — Account passwords hashed with 200k SHA256 iterations; plaintext never stored
+- **Atomic file writes** — State and account files written to `.tmp` then atomically renamed to prevent corruption
 
 ---
 
@@ -279,6 +294,40 @@ For platforms that require login (age-restricted content, private streams):
 
 You can also set a username/password per channel for platforms that support it.
 
+### Webhook Event Payloads
+
+<details>
+<summary><strong><code>stream_live</code> — fired when a monitored stream goes live</strong></summary>
+
+```json
+{
+  "event": "stream_live",
+  "channel_id": "abc12345",
+  "name": "StreamerName",
+  "url": "https://twitch.tv/streamer",
+  "platform": "Twitch",
+  "recording_id": "def67890"
+}
+```
+</details>
+
+<details>
+<summary><strong><code>recording_complete</code> — fired when a recording finishes (success or error)</strong></summary>
+
+```json
+{
+  "event": "recording_complete",
+  "recording_id": "def67890",
+  "channel_id": "abc12345",
+  "status": "completed",
+  "filename": "StreamerName_2026-05-03_14-30-00.mp4",
+  "bytes": 150994944,
+  "error": "",
+  "platform": "Twitch"
+}
+```
+</details>
+
 ---
 
 ## 🧰 Configuration
@@ -294,7 +343,9 @@ You can also set a username/password per channel for platforms that support it.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| Potato / Pi mode | Off | Reduce CPU/RAM/I/O for low-power devices |
 | Check Interval | 60s (120s Pi) | How often to check if channels are live |
+| Auto-record when live | Off | Start recording automatically when a stream goes live |
 | Default Quality | `best` | Default recording quality for new channels |
 | Default Format | `mp4` | Default container format |
 | Auto-convert to MP4 | Off | Remux completed recordings to MP4 |
@@ -303,6 +354,12 @@ You can also set a username/password per channel for platforms that support it.
 | Max Retries | 5 | Maximum reconnect attempts |
 | Retry Delay | 15s | Wait time between retries |
 | Proxy | — | Global proxy for all channels |
+| Extra yt-dlp args | — | Additional yt-dlp arguments applied globally |
+| Cookies File | — | Global cookies file for authentication |
+| Retention Days | 0 (keep forever) | Auto-delete recordings older than this |
+| Max Duration | 0 (no limit) | Auto-stop recordings after N minutes (global) |
+| Webhook URL | — | POST JSON on stream live & recording complete |
+| Auto-stop stalled | Off | Force-stop recordings that stop receiving data |
 
 ---
 
@@ -377,6 +434,7 @@ streamerREC/
 | `POST` | `/api/channels/{id}/refresh` | Refresh channel metadata |
 | `POST` | `/api/channels/reorder` | Reorder channel list |
 | `POST` | `/api/channels/bulk` | Bulk record/stop/delete |
+| `POST` | `/api/channels/bulk-edit` | Bulk edit quality/format |
 
 </details>
 
@@ -390,6 +448,8 @@ streamerREC/
 | `GET` | `/api/download/{id}` | Download a recording |
 | `GET` | `/api/preview/{id}` | Stream/preview a recording |
 | `DELETE` | `/api/recordings/{id}` | Delete a recording |
+| `POST` | `/api/recordings/{id}/archive` | Archive a recording |
+| `POST` | `/api/recordings/{id}/restore` | Restore an archived recording |
 
 </details>
 
@@ -509,10 +569,12 @@ Contributions are welcome! Here's how to get started:
 
 ### Ideas for contributions
 - 🌐 Add translations / i18n support
-- 📱 Improve mobile responsiveness
-- 🔔 Add notification integrations (Discord, Telegram, etc.)
+- 📨 Add more notification targets (Telegram, Pushover, Apprise, email)
 - 🧪 Add test coverage
-- 📊 Add recording analytics / statistics page
+- 📊 Add recording analytics / statistics dashboard
+- ☁️ Automatic cloud backup (S3, R2, Backblaze B2)
+- 🧩 Plugin system for custom post-processing scripts
+- 📱 PWA support (offline mode, push notifications)
 
 ---
 
