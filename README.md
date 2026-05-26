@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/b5ce8b76-14f1-4865-a5a3-561c5ffc6202" alt="StreamRec Dashboard – Dark Mode" width="100%">
+  <img src="screenshots/channels-dark.png" alt="StreamRec Dashboard – Dark Mode" width="100%">
 </p>
 
 ---
@@ -122,32 +122,32 @@ Record live streams from **30+ platforms** including:
 ### 🌙 Dark Mode — Channels
 > The main dashboard showing all monitored channels with live status, recording controls, and real-time stats.
 
-<img src="https://github.com/user-attachments/assets/b5ce8b76-14f1-4865-a5a3-561c5ffc6202" alt="Channels page in dark mode" width="100%">
+<img src="screenshots/channels-dark.png" alt="Channels page in dark mode" width="100%">
 
 ### ☀️ Light Mode — Channels
 > The same channel dashboard in light theme — switch with one click.
 
-<img src="https://github.com/user-attachments/assets/9d18e04f-09d2-4eab-86a6-10fa1503a6f4" alt="Channels page in light mode" width="100%">
+<img src="screenshots/channels-light.png" alt="Channels page in light mode" width="100%">
 
 ### ➕ Add Channel
 > Add any channel by pasting a URL — StreamRec auto-detects the platform and fetches metadata.
 
-<img src="https://github.com/user-attachments/assets/56656d2f-6142-415d-a6f5-293613f7a615" alt="Add channel modal" width="100%">
+<img src="screenshots/add-channel.png" alt="Add channel modal" width="100%">
 
 ### ⚙️ Settings
 > Configure global defaults, proxy, cookies, auto-retry behavior, and more.
 
-<img src="https://github.com/user-attachments/assets/f9187604-c4ed-4e63-b47a-480944881b8c" alt="Settings page" width="100%">
+<img src="screenshots/settings.png" alt="Settings page" width="100%">
 
 ### 🎬 Recordings
 > Browse, preview, download, or delete completed recordings — all from the web UI.
 
-<img src="https://github.com/user-attachments/assets/2b818e42-a613-49d9-a51c-ce7aac1cb470" alt="Recordings page" width="100%">
+<img src="screenshots/recordings.png" alt="Recordings page" width="100%">
 
 ### 🌐 Platforms
 > View all 30+ supported streaming platforms at a glance.
 
-<img src="https://github.com/user-attachments/assets/99f6c1aa-57bb-404d-92d4-26a8eeadc7db" alt="Platforms page" width="100%">
+<img src="screenshots/platforms.png" alt="Platforms page" width="100%">
 
 ---
 
