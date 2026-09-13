@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/yt--dlp-latest-red?logo=youtube&logoColor=white" alt="yt-dlp">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/dependencies-4-purple" alt="4 dependencies">
+  <img src="https://img.shields.io/badge/dependencies-7-purple" alt="4 dependencies">
 </p>
 
 <h1 align="center">StreamRec</h1>
@@ -152,7 +152,7 @@ streamerREC/
 ├── Dockerfile            # main container
 ├── Dockerfile.wireproxy  # optional VPN sidecar
 ├── docker-compose.yml
-└── requirements.txt      # 4 packages
+└── requirements.txt      # 7 packages
 ```
 
 ## Troubleshooting

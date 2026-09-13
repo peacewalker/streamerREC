@@ -30,6 +30,11 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+try:
+    import bigo_engine
+except ImportError:
+    bigo_engine = None
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -538,6 +543,26 @@ async def fetch_metadata(url: str) -> dict:
     # Always extract a fallback username from the URL itself
     url_username = _username_from_url(url)
 
+    # Bigo: native engine path (yt-dlp cannot pass Bigo's web gate).
+    # Use the fast ungated user-info endpoint; the token+retry stream fetch
+    # only belongs in run_recording.
+    if bigo_engine and re.search(r"bigo\.tv", url, re.I):
+        try:
+            sid = bigo_engine.site_id(url)
+            info = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: bigo_engine.fetch_user(sid))
+            if info:
+                return {
+                    "display_name": info.get("nickname") or url_username,
+                    "username":     sid,
+                    "avatar":       info.get("thumbnail") or "",
+                    "thumbnail":    info.get("thumbnail") or "",
+                    "is_live":      bool(info.get("alive")),
+                    "stream_title": info.get("topic") or "",
+                }
+        except Exception as e:
+            logger.debug("bigo metadata failed for %s: %s", url, e)
+
     try:
         async with _proc_semaphore:
             proc = await asyncio.create_subprocess_exec(
@@ -661,6 +686,16 @@ async def _check_chaturbate_live(url: str, proxy: str = "") -> Optional[bool]:
 
 
 async def check_is_live(url: str, proxy: str = "") -> bool:
+    # Bigo: native engine live check (fast, no yt-dlp)
+    if bigo_engine and re.search(r"bigo\.tv", url, re.I):
+        try:
+            sid = bigo_engine.site_id(url)
+            return await asyncio.get_running_loop().run_in_executor(
+                None, lambda: bigo_engine.check_live(sid, proxy=proxy))
+        except Exception as e:
+            logger.debug("bigo live check failed for %s: %s", url, e)
+            return False
+
     # For Chaturbate, try a fast HTTP scrape first before invoking yt-dlp
     if re.search(r"chaturbate\.com", url, re.I):
         result = await _check_chaturbate_live(url, proxy=proxy)
@@ -740,6 +775,50 @@ async def run_recording(rec_id: str):
     platform_raw = rec.get("platform") or "Unknown"
     platform     = platform_raw.lower()
 
+    # Bigo: native engine — resolve HLS via bigo_engine, record with ffmpeg directly.
+    # (yt-dlp cannot pass Bigo's web anti-bot gate.)
+    _bigo_hls = None
+    if bigo_engine and platform == "bigo":
+        try:
+            loop = asyncio.get_running_loop()
+            sid = bigo_engine.site_id(url)
+            info = await loop.run_in_executor(
+                None, lambda: bigo_engine.fetch_stream(sid, proxy=ch.get("proxy") or settings.get("proxy", "")))
+            _bigo_hls = info.get("hls_src") or ""
+            if info.get("nickname"):
+                username = info["nickname"]
+                # keep channel card fresh too
+                if (ch_id := rec.get("channel_id")) and ch_id in channels:
+                    channels[ch_id]["display_name"] = info["nickname"]
+                    if info.get("thumbnail"):
+                        channels[ch_id]["thumbnail"] = info["thumbnail"]
+                    if info.get("topic"):
+                        channels[ch_id]["stream_title"] = info["topic"]
+            if not _bigo_hls:
+                rec["status"] = "error"
+                rec["ended_at"] = time.time()
+                rec["error"] = "Bigo: stream offline or gated (needLogin)"
+                logger.warning("Bigo recording %s aborted — no HLS url (alive=%s)", rec_id, info.get("alive"))
+                if ch_id := rec.get("channel_id"):
+                    ch_entry = channels.get(ch_id)
+                    if ch_entry and ch_entry.get("recording_id") == rec_id:
+                        ch_entry["recording_id"] = None
+                        ch_entry["is_live"] = False
+                _save_state()
+                return
+        except Exception as e:
+            rec["status"] = "error"
+            rec["ended_at"] = time.time()
+            rec["error"] = f"Bigo engine error: {e}"
+            logger.warning("Bigo recording %s engine failure: %s", rec_id, e)
+            if ch_id := rec.get("channel_id"):
+                ch_entry = channels.get(ch_id)
+                if ch_entry and ch_entry.get("recording_id") == rec_id:
+                    ch_entry["recording_id"] = None
+                    ch_entry["is_live"] = False
+            _save_state()
+            return
+
     username     = ch.get("display_name") or ch.get("username") or rec_id
     safe_plat    = re.sub(r'[^\w\-]', '_', platform_raw)
     safe_user    = re.sub(r'[^\w\-]', '_', username)
@@ -782,94 +861,120 @@ async def run_recording(rec_id: str):
         # User specified explicit quality (1080p, 720p, etc.) for non-cam platforms
         effective_quality = quality
 
-    cmd = ["yt-dlp", "--no-part"]
-    if platform not in _no_live_from_start:
-        cmd += ["--live-from-start", "--hls-use-mpegts"]
+    if _bigo_hls:
+        # Route through the local descrambling proxy (Bigo scrambles segment
+        # headers server-side via EXT-X-BIGO-WEB-PROTECTION).
+        _bigo_proxy = ch.get("proxy") or settings.get("proxy", "")
+        try:
+            _bigo_hls = bigo_engine.proxy_hls(_bigo_hls, proxy=_bigo_proxy)
+        except Exception as e:
+            logger.debug("bigo proxy_hls failed, using raw url: %s", e)
+        out_file = str(output_path).replace("%(ext)s", "mp4" if fmt == "mp4" else "ts")
+        cmd = ["ffmpeg", "-y",
+               "-headers", f"Referer: https://www.bigo.tv/\r\nUser-Agent: {bigo_engine.UA}\r\n",
+               "-i", _bigo_hls,
+               "-c", "copy",
+               "-timeout", "30", "-reconnect", "1", "-reconnect_streamed", "1",
+               "-reconnect_delay_max", "10"]
+        max_dur = int(ch.get("max_duration") or settings.get("max_duration", 0) or 0)
+        if max_dur > 0:
+            cmd += ["-t", str(max_dur * 60)]
+        if fmt == "mp4":
+            cmd += ["-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"]
+        else:
+            cmd += ["-f", "mpegts"]
+        cmd += [out_file]
 
     # Limit ffmpeg thread count — critical for Pi / low-power CPUs
     ffmpeg_threads = get_ffmpeg_threads()
-    cmd += [
-        "--retries", "infinite", "--fragment-retries", "infinite",
-        "--retry-sleep", "5", "--socket-timeout", "30",
-        "--no-warnings", "--newline",
-        "--concurrent-fragments", "1",
-        # force-fixup is MP4-specific; for mkv/ts it warns and can abort on
-        # recoverable errors.  "warn" is the safe mode for other containers.
-        "--fixup", "force" if fmt == "mp4" else "warn",
-        # -stats + -loglevel info override yt-dlp's default ffmpeg silence so
-        # live HLS recordings produce visible progress in the log viewer.
-        "--downloader-args",
-        f"ffmpeg:-threads {ffmpeg_threads} -fflags +genpts+discardcorrupt -stats -loglevel info",
-        "-f", effective_quality,
-        "--merge-output-format", fmt,
-        # NOTE: no --print here — it implies --quiet and silences the entire
-        # log for live recordings.  The final filepath is resolved via the
-        # output glob after the process exits.
-        "--progress",
-    ]
-    # On Pi / low-memory systems, cap the download buffer to reduce RAM usage
-    if _is_pi():
-        cmd += ["--buffer-size", "32K"]
-    # Chaturbate (and similar HLS cam sites) have audio segments that start
-    # exactly 1 second ahead of video — delay audio by 1s to compensate.
-    if platform in _cam_platforms:
-        cmd += ["--postprocessor-args", "ffmpeg:-c:v copy -c:a aac -af adelay=1000|1000"]
 
-    # Proxy (channel > global)
-    proxy = ch.get("proxy") or settings.get("proxy", "")
-    if proxy:
-        cmd += ["--proxy", proxy]
+    if not _bigo_hls:
+        cmd = ["yt-dlp", "--no-part"]
+        if platform not in _no_live_from_start:
+            cmd += ["--live-from-start", "--hls-use-mpegts"]
 
-    # Cookies file (channel > global)
-    cf_name = ch.get("cookies_file") or settings.get("cookies_file", "")
-    if cf_name:
-        cf = Path(cf_name) if Path(cf_name).is_absolute() else COOKIES_DIR / cf_name
-        if cf.exists():
-            cmd += ["--cookies", str(cf)]
+        cmd += [
+            "--retries", "infinite", "--fragment-retries", "infinite",
+            "--retry-sleep", "5", "--socket-timeout", "30",
+            "--no-warnings", "--newline",
+            "--concurrent-fragments", "1",
+            # force-fixup is MP4-specific; for mkv/ts it warns and can abort on
+            # recoverable errors.  "warn" is the safe mode for other containers.
+            "--fixup", "force" if fmt == "mp4" else "warn",
+            # -stats + -loglevel info override yt-dlp's default ffmpeg silence so
+            # live HLS recordings produce visible progress in the log viewer.
+            "--downloader-args",
+            f"ffmpeg:-threads {ffmpeg_threads} -fflags +genpts+discardcorrupt -stats -loglevel info",
+            "-f", effective_quality,
+            "--merge-output-format", fmt,
+            # NOTE: no --print here — it implies --quiet and silences the entire
+            # log for live recordings.  The final filepath is resolved via the
+            # output glob after the process exits.
+            "--progress",
+        ]
+        # On Pi / low-memory systems, cap the download buffer to reduce RAM usage
+        if _is_pi():
+            cmd += ["--buffer-size", "32K"]
+        # Chaturbate (and similar HLS cam sites) have audio segments that start
+        # exactly 1 second ahead of video — delay audio by 1s to compensate.
+        if platform in _cam_platforms:
+            cmd += ["--postprocessor-args", "ffmpeg:-c:v copy -c:a aac -af adelay=1000|1000"]
 
-    # Username / password for age-restricted sites
-    ch_user = ch.get("ch_username", "")
-    ch_pass = ch.get("ch_password", "")
-    if ch_user:
-        cmd += ["--username", ch_user]
-    if ch_pass:
-        cmd += ["--password", ch_pass]
+        # Proxy (channel > global)
+        proxy = ch.get("proxy") or settings.get("proxy", "")
+        if proxy:
+            cmd += ["--proxy", proxy]
 
-    # Extra yt-dlp args (channel > global) — hardened against injection
-    extra = ch.get("extra_args") or settings.get("extra_args", "")
-    if extra:
-        try:
-            parts = shlex.split(extra, posix=not IS_WINDOWS)
-            # Block dangerous yt-dlp flags that could execute arbitrary commands or manipulate filesystem
-            _DANGEROUS_FLAGS = {
-                "--exec", "-X", "--exec-before-download", "--config-location", "--config-locations",
-                "--print", "--print-to-file", "--output-na-placeholder",
-                "--downloader", "--external-downloader", "--downloader-args", "--external-downloader-args",
-                "--postprocessor-args", "--ppa", "--exec-after-download",
-                "--proxy", "--cookies", "--cookies-from-browser",
-                "--ffmpeg-location", "--prefer-ffmpeg", "-P", "--paths",
-                "-a", "--batch-file", "--load-info-json", "--plugin-dirs",
-                "-o", "--output", "--alias",
-            }
-            for part in parts:
-                flag = part.split("=")[0].strip() if "=" in part else part.strip()
-                flag_lower = flag.lower()
-                if (
-                    flag_lower in _DANGEROUS_FLAGS
-                    or flag_lower.startswith("--exec")
-                    or flag_lower.startswith("--config")
-                    or flag_lower.startswith("--paths")
-                    or flag_lower.startswith("-P")
-                ):
-                    logger.warning("Blocked dangerous extra_args flag: %s", flag)
-                    raise ValueError(f"Blocked dangerous yt-dlp flag: {flag}")
-            cmd += parts
-        except ValueError:
-            raise  # re-raise our own validation errors
-        except Exception as e:
-            logger.warning("Failed to parse extra_args %r: %s", extra, e)
+        # Cookies file (channel > global)
+        cf_name = ch.get("cookies_file") or settings.get("cookies_file", "")
+        if cf_name:
+            cf = Path(cf_name) if Path(cf_name).is_absolute() else COOKIES_DIR / cf_name
+            if cf.exists():
+                cmd += ["--cookies", str(cf)]
 
-    cmd += ["-o", str(output_path), url]
+        # Username / password for age-restricted sites
+        ch_user = ch.get("ch_username", "")
+        ch_pass = ch.get("ch_password", "")
+        if ch_user:
+            cmd += ["--username", ch_user]
+        if ch_pass:
+            cmd += ["--password", ch_pass]
+
+        # Extra yt-dlp args (channel > global) — hardened against injection
+        extra = ch.get("extra_args") or settings.get("extra_args", "")
+        if extra:
+            try:
+                parts = shlex.split(extra, posix=not IS_WINDOWS)
+                # Block dangerous yt-dlp flags that could execute arbitrary commands or manipulate filesystem
+                _DANGEROUS_FLAGS = {
+                    "--exec", "-X", "--exec-before-download", "--config-location", "--config-locations",
+                    "--print", "--print-to-file", "--output-na-placeholder",
+                    "--downloader", "--external-downloader", "--downloader-args", "--external-downloader-args",
+                    "--postprocessor-args", "--ppa", "--exec-after-download",
+                    "--proxy", "--cookies", "--cookies-from-browser",
+                    "--ffmpeg-location", "--prefer-ffmpeg", "-P", "--paths",
+                    "-a", "--batch-file", "--load-info-json", "--plugin-dirs",
+                    "-o", "--output", "--alias",
+                }
+                for part in parts:
+                    flag = part.split("=")[0].strip() if "=" in part else part.strip()
+                    flag_lower = flag.lower()
+                    if (
+                        flag_lower in _DANGEROUS_FLAGS
+                        or flag_lower.startswith("--exec")
+                        or flag_lower.startswith("--config")
+                        or flag_lower.startswith("--paths")
+                        or flag_lower.startswith("-P")
+                    ):
+                        logger.warning("Blocked dangerous extra_args flag: %s", flag)
+                        raise ValueError(f"Blocked dangerous yt-dlp flag: {flag}")
+                cmd += parts
+            except ValueError:
+                raise  # re-raise our own validation errors
+            except Exception as e:
+                logger.warning("Failed to parse extra_args %r: %s", extra, e)
+
+        cmd += ["-o", str(output_path), url]
 
     rec["status"]     = "recording"
     rec["started_at"] = time.time()
@@ -990,11 +1095,13 @@ async def run_recording(rec_id: str):
                     if m2:
                         rec["speed"] = m2.group(1)
                 # Detect final filepath printed by --print after_move:filepath
+                # (exclude ffmpeg banner/progress noise that also contains the dir)
                 if (not line.startswith("[") and not line.startswith("ERROR")
+                        and not line.startswith("Output")
                         and len(line) > 4 and rec_dir_str in line):
-                    p = Path(line)
-                    if p.suffix:
-                        rec["filepath"] = line
+                    p = Path(line.strip("'"))
+                    if p.suffix and p.is_absolute():
+                        rec["filepath"] = str(p)
                         rec["filename"] = p.name
 
         await proc.wait()
